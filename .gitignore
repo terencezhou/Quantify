@@ -9,5 +9,5 @@
 .DS_Store
 storage/Positions
 config.yaml
-
+stock_config.yaml
 logs/*

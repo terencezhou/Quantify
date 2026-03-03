@@ -1,0 +1,92 @@
+# ══════════════════════════════════════════════════════════
+#  Sequoia 选股系统配置文件 (stock_config.yaml)
+#  供 main_new.py 使用
+# ══════════════════════════════════════════════════════════
+
+data_dir: "stock_data"
+end_date:
+
+# ── 市场过滤 ──
+# 留空或注释掉则不过滤，拉取全部A股
+# 可选值: 沪主板 / 深主板 / 创业板 / 科创板 / 北交所
+markets:
+  - 沪主板
+  - 深主板
+#  - 创业板
+#  - 科创板
+#  - 北交所
+
+# ── 推送配置 ──
+push:
+  enable: true
+  wxpusher_uid: "UID_ojFEaVaj5Q4enK45T1NcgWOBOeOd"
+  wxpusher_token: "AT_qRHfmcWPNU5kANRJHtfp7RuasO3wF1Uj"
+
+# ── 数据源开关 ──
+# 按需开启，首次拉取较慢，后续增量更新
+fetch_fund_flow: true        # 个股资金流（主力/大单/中单/小单净流入）
+fetch_intraday: true         # 分时K线数据
+intraday_period: "5"         # 分时周期：5/15/30/60 分钟
+fetch_sector_flow: true      # 行业板块资金流排行
+fetch_lhb_detail: true       # 龙虎榜详情（近30天）
+fetch_zt_pool: true          # 涨停池三件套（当日涨停+昨日涨停+强势股）
+fetch_concept_board: true    # 概念板块涨跌排行
+fetch_chips: false           # 筹码分布（逐个股，首次拉取较慢）临时关闭加速测试
+fetch_hsgt_flow: true        # 北向/南向资金汇总
+fetch_financial: true        # 财务指标（季报数据，按天缓存，首次较慢）
+fetch_hsgt_hold: true        # 北向持股明细（按个股缓存，今日排行）
+fetch_big_deal: true         # 同花顺大单追踪（盘中实时，按成交时间排序）
+fetch_stock_info: false      # 个股基本信息（总股本/市值/行业等，7天缓存，首次拉取全量较慢）
+
+# 网络超时（秒），单个数据源超时后自动跳过
+fetch_timeout: 1800
+
+# ── 隧道代理配置 ──
+# 启用后，所有 akshare 请求自动走隧道代理（东财/新浪域名），避免 IP 被封
+# 每次请求自动切换出口 IP，请勿复用 keep-alive 连接
+proxy:
+  enable: true
+  tunnel: "xxx"
+  tunnel_backup: "xxx"
+  username: "xxx"
+  password: "xxx"
+  timeout: 30                  # 单次代理请求超时（秒）
+  max_retries: 3               # 主隧道失败后重试次数（含切备用）
+
+# ── 预测器配置 ──
+predictors:
+  - class: RallyImminent
+    enabled: true
+    top_n: 50
+    min_score: 30
+
+# ── 策略组合筛选 ──
+# combos:
+#   - name: "技术+基本面"
+#     strategies: [rally_ready, fundamental]
+#     mode: intersection       # intersection / union
+#     top_n: 30
+#     min_score:
+#       rally_ready: 30
+#       fundamental: 30
+
+# ── 当前持仓 ──
+# sell 命令使用：结合市场情绪/行业热度/龙头状态，分析每只持仓是否应该卖出
+# 详见 docs/sell_point.md
+holdings:
+  - code: "600583"
+    name: "海油工程"
+    buy_price: 8.33
+    buy_date: "2026-03-03"
+    shares: 300
+    buy_reason: "打板买入"       # 可选：买入逻辑
+  - code: "605305"
+    name: "中际联合"
+    buy_price: 39.54
+    buy_date: "2026-02-24"
+    shares: 100
+  - code: "601975"
+    name: "招商南油"
+    buy_price: 4.97
+    buy_date: "2026-03-04"
+    shares: 700
