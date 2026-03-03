@@ -1,0 +1,15 @@
+cron: false
+data_dir: "data"
+end_date: 
+
+push:
+  enable: false
+  wxpusher_uid: ""
+  wxpusher_token: ""
+
+# 扩展数据源开关（拉取耗时较长，按需开启）
+fetch_fund_flow: false      # 个股资金流（主力/大单/中单/小单净流入）
+fetch_intraday: false       # 分时K线数据
+intraday_period: "5"        # 分时周期：5/15/30/60 分钟
+fetch_sector_flow: false    # 行业板块资金流排行
+fetch_lhb_detail: false     # 龙虎榜详情（近30天）
