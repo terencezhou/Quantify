@@ -413,7 +413,7 @@ class DataManager:
         mtime = datetime.fromtimestamp(os.path.getmtime(path))
         return mtime.date() == date.today() and mtime.hour >= 15
 
-    def _fetch_daily_one(self, code_name, start_date="20220101"):
+    def _fetch_daily_one(self, code_name, lookback_days=30):
         stock = code_name[0]
         last_cached_date = self._cache.get_daily_last_date(stock)
 
@@ -435,10 +435,10 @@ class DataManager:
                         data['p_change'] = tl.ROC(data['收盘'], 1)
                     return data
 
-            next_day = last_cached_date + timedelta(days=1)
-            fetch_start = next_day.strftime('%Y%m%d')
+            fetch_origin = (last_cached_date - timedelta(days=lookback_days))
+            fetch_start = fetch_origin.strftime('%Y%m%d')
         else:
-            fetch_start = start_date
+            fetch_start = "20220101"
 
         new_data = None
         try:
@@ -474,11 +474,11 @@ class DataManager:
             data['p_change'] = tl.ROC(data['收盘'], 1)
         return data
 
-    def _run_daily(self, stocks, start_date="20220101"):
+    def _run_daily(self, stocks, lookback_days=30):
         stocks_data = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
             future_to_stock = {
-                executor.submit(self._fetch_daily_one, stock, start_date): stock
+                executor.submit(self._fetch_daily_one, stock, lookback_days): stock
                 for stock in stocks
             }
             for future in concurrent.futures.as_completed(future_to_stock):
