@@ -681,18 +681,31 @@ class DataManager:
         if self._cache.is_intraday_fresh(stock):
             return self._cache.get_intraday(stock)
 
-        df = self._fetch_intraday_em(stock, period)
+        cached = self._cache.get_intraday(stock)
+        start_dt = None
+        if cached is not None and not cached.empty and '时间' in cached.columns:
+            try:
+                latest = pd.to_datetime(cached['时间'].max())
+                start_dt = (latest - timedelta(days=3)).strftime('%Y-%m-%d 09:00:00')
+            except Exception:
+                pass
+
+        df = self._fetch_intraday_em(stock, period, start_dt=start_dt)
         if df is None or df.empty:
             df = self._fetch_intraday_sina(stock, period)
 
         if df is not None and not df.empty:
             return self._cache.merge_intraday(stock, df)
-        return self._cache.get_intraday(stock)
+        return cached
 
-    def _fetch_intraday_em(self, stock, period='5'):
-        """东财源 — stock_zh_a_hist_min_em（最近5个交易日）"""
+    def _fetch_intraday_em(self, stock, period='5', start_dt=None):
+        """东财源 — stock_zh_a_hist_min_em，有缓存时从缓存最新时间往前3天拉取，无缓存时用默认全量"""
         try:
-            df = ak.stock_zh_a_hist_min_em(symbol=stock, period=period, adjust='qfq')
+            kwargs = dict(symbol=stock, period=period, adjust='qfq')
+            if start_dt is not None:
+                kwargs['start_date'] = start_dt
+                kwargs['end_date'] = datetime.now().strftime('%Y-%m-%d 15:30:00')
+            df = ak.stock_zh_a_hist_min_em(**kwargs)
             if df is not None and not df.empty:
                 logging.info("分时(东财) %s OK, %d bars", stock, len(df))
                 return df
@@ -741,20 +754,25 @@ class DataManager:
     # ══════════════════════════════════════════════
 
     def _fetch_chips_one(self, code_name):
-        stock = code_name[0]
+        stock, name = code_name[0], code_name[1]
         if self._cache.is_chips_fresh(stock):
+            logging.info("筹码 %s(%s) 命中缓存", name, stock)
             return self._cache.get_chips(stock)
 
         try:
             df = ak.stock_cyq_em(symbol=stock, adjust='qfq')
             if df is not None and not df.empty:
+                logging.warning("筹码 %s(%s) 拉取成功, %d 条", name, stock, len(df))
                 return self._cache.merge_chips(stock, df)
+            else:
+                logging.warning("筹码 %s(%s) 返回空数据", name, stock)
         except Exception as e:
-            logging.warning("拉取筹码分布失败 %s: %s", stock, e)
+            logging.warning("筹码 %s(%s) 拉取失败: %s", name, stock, e)
         return self._cache.get_chips(stock)
 
     def _run_chips(self, stocks):
         result = {}
+        ok, fail, cached = 0, 0, 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
             fmap = {executor.submit(self._fetch_chips_one, s): s for s in stocks}
             for future in concurrent.futures.as_completed(fmap):
@@ -763,9 +781,13 @@ class DataManager:
                     data = future.result()
                     if data is not None:
                         result[stock] = data
+                        ok += 1
+                    else:
+                        fail += 1
                 except Exception as exc:
-                    logging.debug("筹码 %s(%s): %s", stock[1], stock[0], exc)
-        logging.info("筹码分布加载完成: %d只", len(result))
+                    fail += 1
+                    logging.warning("筹码 %s(%s) 异常: %s", stock[1], stock[0], exc)
+        logging.info("筹码分布加载完成: %d只 (成功%d, 失败%d)", len(result), ok, fail)
         return result
 
     # ══════════════════════════════════════════════
