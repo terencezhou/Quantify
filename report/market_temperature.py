@@ -90,8 +90,13 @@ class TemperatureResult:
     score: float = 0.0
 
     # 情绪阶段及策略建议
-    phase: str = ''             # 冰点期 / 混沌期 / 主升期 / 高潮期
-    strategy: str = ''          # 对应的游资操作建议
+    phase: str = ''             # 冰点期 / 混沌/修复期 / 主升/发酵期 / 高潮期
+    strategy: str = ''          # 对应阶段的明日操作策略
+
+    # 情绪方向与策略适配
+    trend: str = ''             # 上升 / 震荡 / 下降（基于原始指标今昨对比）
+    strategy_hint: str = ''     # 策略排序，如 "低吸 > 半路 > 接力"
+    strategy_reason: str = ''   # 一句话理由
 
     # 基准日期（通常为上一个交易日）
     trade_date: Optional[str] = None
@@ -195,6 +200,16 @@ class MarketTemperature:
         except Exception as e:
             logging.warning('LeaderStockFinder 计算失败: %s', e)
             result.leader_stocks = []
+
+        # ── Step 8：情绪方向 + 策略适配提示 ──────────────────────
+        U_prev, H_prev = self._derive_prev_metrics()
+        result.trend = self._classify_trend(result.metrics, U_prev, H_prev)
+        result.strategy_hint, result.strategy_reason = self._suggest_strategy_mix(
+            result.metrics, result.trend, result.phase, result.hot_sectors,
+        )
+        logging.debug(
+            'trend=%s, strategy_hint=%s', result.trend, result.strategy_hint,
+        )
 
         return result
 
@@ -791,6 +806,130 @@ class MarketTemperature:
         )
 
     # ──────────────────────────────────────────────────────────
+    #  Step 8：情绪方向 + 策略适配
+    # ──────────────────────────────────────────────────────────
+
+    def _derive_prev_metrics(self) -> tuple[int, int]:
+        """从 zt_pool_previous 提取昨日原始指标 (U_prev, H_prev)。
+
+        不依赖任何缓存的派生分数，纯粹基于原始数据。
+        """
+        prev_df = self.dm.extra.get('zt_pool_previous')
+        if prev_df is None or prev_df.empty:
+            return 0, 0
+
+        if '快照日期' in prev_df.columns:
+            snap = prev_df[prev_df['快照日期'] == prev_df['快照日期'].max()].copy()
+        else:
+            snap = prev_df.copy()
+
+        mask_st = snap['名称'].str.upper().str.contains('ST', na=False)
+        snap = snap[~mask_st]
+
+        if snap.empty:
+            return 0, 0
+
+        U_prev = len(snap)
+
+        _col = '昨日连板数' if '昨日连板数' in snap.columns else '连板数'
+        if _col in snap.columns:
+            h_series = pd.to_numeric(snap[_col], errors='coerce').dropna()
+            H_prev = int(h_series.max()) if len(h_series) > 0 else 0
+        else:
+            H_prev = 0
+
+        logging.debug(
+            '_derive_prev_metrics: U_prev=%d, H_prev=%d', U_prev, H_prev,
+        )
+        return U_prev, H_prev
+
+    @staticmethod
+    def _classify_trend(
+        m: TemperatureMetrics,
+        U_prev: int,
+        H_prev: int,
+    ) -> str:
+        """基于今昨原始指标对比，判断情绪方向。
+
+        规则按优先级：
+          1. 空间龙断板 (H_prev>=5, H 下降 >1)  → 下降
+          2. R_yu<0 且 U 缩量                     → 下降
+          3. R_yu>2 且 U 不缩                     → 上升
+          4. 新高度打开 (H>H_prev 且 H>=5)        → 上升
+          5. 其余                                 → 震荡
+        """
+        if H_prev >= 5 and m.H < H_prev - 1:
+            return '下降'
+        if m.R_yu < 0 and m.U < U_prev:
+            return '下降'
+        if m.R_yu > 2 and U_prev > 0 and m.U >= U_prev:
+            return '上升'
+        if m.H > H_prev and m.H >= 5:
+            return '上升'
+        return '震荡'
+
+    @staticmethod
+    def _suggest_strategy_mix(
+        m: TemperatureMetrics,
+        trend: str,
+        phase: str,
+        hot_sectors: list,
+    ) -> tuple[str, str]:
+        """根据原始指标 + 情绪方向 + 板块状态，输出策略排序和理由。
+
+        Returns:
+            (strategy_hint, strategy_reason)
+        """
+        if phase == '冰点期':
+            return (
+                '观望 > 冰点试错',
+                '市场冰点，空仓为主。连续冰点可小仓位试错新题材首板。',
+            )
+
+        if trend == '下降':
+            return (
+                '观望 > 低吸（极轻仓）',
+                '情绪退化中，等企稳再动手。若参与仅限核心票分歧低吸。',
+            )
+
+        has_launch = any(
+            getattr(s, 'phase', '') == '启动' for s in hot_sectors
+        )
+
+        if trend == '上升':
+            if m.PR >= 0.20:
+                return (
+                    '接力 > 半路 > 低吸',
+                    f'接力环境回暖（PR={m.PR:.0%}），龙头有溢价，优先做连板接力。',
+                )
+            return (
+                '半路 > 低吸 > 接力',
+                f'赚钱效应好（R_yu={m.R_yu:+.1f}%）但晋级率低（PR={m.PR:.0%}），'
+                '首板机会优于高位接力。',
+            )
+
+        # trend == '震荡'
+        if m.PR >= 0.20:
+            return (
+                '接力 > 趋势 > 轮动',
+                f'有连板基础（PR={m.PR:.0%}），可做接力和趋势跟踪。',
+            )
+        if m.FR >= 0.70:
+            return (
+                '半路 > 低吸 > 轮动',
+                f'封板率尚可（FR={m.FR:.0%}），适合首板半路和核心票低吸。',
+            )
+        if has_launch:
+            return (
+                '轮动 > 半路 > 趋势',
+                '有新板块处于启动期，跟踪板块轮动节奏。',
+            )
+        return (
+            '趋势 > 轮动 > 观望',
+            '无明确方向，轻仓跟踪趋势股为主。',
+        )
+
+    # ──────────────────────────────────────────────────────────
     #  输出/展示
     # ──────────────────────────────────────────────────────────
 
@@ -799,9 +938,9 @@ class MarketTemperature:
         m = result.metrics
         phase, strategy = result.phase, result.strategy
         lines = [
-            f'## 市场情绪温度计  （交易日：{result.trade_date}）',
+            f'## 打板复盘报告（交易日：{result.trade_date}）',
             '',
-            '### 核心指标',
+            '### 市场快照',
             f'| 指标 | 值 | 说明 |',
             f'|------|-----|------|',
             f'| 涨停数 U | {m.U} | 非ST有效涨停 |',
@@ -813,7 +952,7 @@ class MarketTemperature:
             f'| 连板晋级率 PR | {m.PR:.1%} | 今日连板/昨日首板及以上 |',
             f'| 最高连板 H | {m.H} | 板 |',
             '',
-            '### 分项得分',
+            '### 环境评分',
             f'| 维度 | 得分 | 满分 |',
             f'|------|------|------|',
             f'| 赚钱效应（R_yu） | {result.score_earn:.1f} | 40 |',
@@ -822,11 +961,19 @@ class MarketTemperature:
             f'| 恐慌扣分（D+M） | {result.score_panic:.1f} | 0（扣分项）|',
             f'| 空间溢价（H+U） | {result.score_space:.1f} | 20 |',
             '',
-            f'### 综合情绪得分：**{result.score:.1f} 分**',
+            f'### 连板接力环境：**{result.score:.1f} 分**',
             '',
-            f'### 当前阶段：**{phase}**',
+            f'### 明日操作策略：**{phase}**',
             f'> {strategy}',
         ]
+
+        if result.strategy_hint:
+            lines.append('')
+            lines.append(
+                f'### 明日策略倾向：**{result.strategy_hint}**'
+                f'（情绪{result.trend}）'
+            )
+            lines.append(f'> {result.strategy_reason}')
 
         # 行业板块热度
         if result.hot_sectors:
@@ -834,7 +981,7 @@ class MarketTemperature:
             lines.append('')
             lines.append(IndustryTemperature.to_markdown(result.hot_sectors))
 
-        # 龙头股追踪
+        # 龙头股追踪（连接 leader_stock 模块输出）
         if result.leader_stocks:
             from report.leader_stock import LeaderStockFinder
             lines.append('')

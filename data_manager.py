@@ -67,6 +67,7 @@ class CacheStatus:
     financial_count: int = 0
     hsgt_hold_count: int = 0
     stock_info_count: int = 0
+    concept_cons_count: int = 0
     snapshot_names: List[str] = field(default_factory=list)
 
 
@@ -199,14 +200,17 @@ class DataManager:
             financial_count=stats.get('financial', 0),
             hsgt_hold_count=stats.get('hsgt_hold', 0),
             stock_info_count=stats.get('stock_info', 0),
+            concept_cons_count=stats.get('concept_cons', 0),
         )
 
     def report_cache_status(self):
         s = self.get_cache_status()
         logging.info(
-            "本地缓存: 日K=%d, 资金流=%d, 分时=%d, 筹码=%d, 财务=%d, 北向持股=%d, 个股信息=%d",
+            "本地缓存: 日K=%d, 资金流=%d, 分时=%d, 筹码=%d, 财务=%d, "
+            "北向持股=%d, 个股信息=%d, 概念成分=%d",
             s.daily_count, s.fund_flow_count, s.intraday_count,
-            s.chips_count, s.financial_count, s.hsgt_hold_count, s.stock_info_count,
+            s.chips_count, s.financial_count, s.hsgt_hold_count,
+            s.stock_info_count, s.concept_cons_count,
         )
 
     def build_rt_lookup(self) -> Dict[str, Any]:
@@ -287,7 +291,14 @@ class DataManager:
             except Exception as e:
                 logging.warning("数据[%s] 拉取异常: %s，跳过", key, e)
 
-        # ── 5. 逐只批量类（北向持股、筹码、个股信息）──
+        # ── 5. 概念板块成分股（依赖 concept_board 列表，须在快照之后）──
+        if cfg.get('fetch_concept_cons', False):
+            try:
+                extra['concept_cons'] = self._run_concept_cons(extra)
+            except Exception as e:
+                logging.warning("数据[concept_cons] 拉取异常: %s，跳过", e)
+
+        # ── 6. 逐只批量类（北向持股、筹码、个股信息）──
         if cfg.get('fetch_hsgt_hold', False):
             try:
                 extra['hsgt_hold'] = self._run_hsgt_hold(stocks)
@@ -676,7 +687,7 @@ class DataManager:
     #  分时K线（东财 + 新浪备用）
     # ══════════════════════════════════════════════
 
-    def _fetch_intraday_one(self, code_name, period='5'):
+    def _fetch_intraday_one(self, code_name, period='3'):
         stock = code_name[0]
         if self._cache.is_intraday_fresh(stock):
             return self._cache.get_intraday(stock)
@@ -736,7 +747,7 @@ class DataManager:
 
     def _run_intraday(self, stocks, period='5'):
         result = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             fmap = {executor.submit(self._fetch_intraday_one, s, period): s for s in stocks}
             for future in concurrent.futures.as_completed(fmap):
                 stock = fmap[future]
@@ -773,7 +784,7 @@ class DataManager:
     def _run_chips(self, stocks):
         result = {}
         ok, fail, cached = 0, 0, 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             fmap = {executor.submit(self._fetch_chips_one, s): s for s in stocks}
             for future in concurrent.futures.as_completed(fmap):
                 stock = fmap[future]
@@ -1092,6 +1103,88 @@ class DataManager:
                 logging.warning("拉取资产负债表 %s 失败: %s", q, e)
 
         return self._cache.get_snapshot('financial_balance')
+
+    # ══════════════════════════════════════════════
+    #  概念板块成分股（按概念缓存，与日K线同周期更新）
+    # ══════════════════════════════════════════════
+
+    def _fetch_concept_cons_one(self, concept_name, concept_code):
+        """拉取单个概念板块的成分股，优先走缓存。"""
+        if self._cache.is_concept_cons_fresh(concept_code):
+            return self._cache.get_concept_cons(concept_code)
+
+        try:
+            df = ak.stock_board_concept_cons_em(symbol=concept_name)
+            if df is not None and not df.empty:
+                df['板块名称'] = concept_name
+                df['板块代码'] = concept_code
+                return self._cache.merge_concept_cons(concept_code, df)
+        except Exception as e:
+            logging.debug("概念成分股 %s(%s) 拉取失败: %s", concept_name, concept_code, e)
+
+        return self._cache.get_concept_cons(concept_code)
+
+    def _run_concept_cons(self, extra):
+        """拉取全部概念板块的成分股，返回 {concept_code: DataFrame}。
+
+        先用 concept_board 快照获取概念列表，再逐概念并发拉取成分股。
+        """
+        concept_df = extra.get('concept_board')
+        if concept_df is None or concept_df.empty:
+            concept_df = self._cache.get_snapshot_latest("concept_board")
+        if concept_df is None or concept_df.empty:
+            logging.warning("概念成分股: 无概念列表，跳过")
+            return {}
+
+        tasks = []
+        for _, row in concept_df.iterrows():
+            name = row.get('板块名称', '')
+            code = row.get('板块代码', '')
+            if name and code:
+                tasks.append((name, code))
+
+        cached_hit = 0
+        fetch_needed = []
+        result = {}
+        for name, code in tasks:
+            if self._cache.is_concept_cons_fresh(code):
+                df = self._cache.get_concept_cons(code)
+                if df is not None:
+                    result[code] = df
+                    cached_hit += 1
+                    continue
+            fetch_needed.append((name, code))
+
+        if not fetch_needed:
+            logging.info("概念成分股全部命中缓存: %d个", cached_hit)
+            return result
+
+        logging.info("概念成分股: 缓存命中 %d, 需拉取 %d", cached_hit, len(fetch_needed))
+        fetch_ok = 0
+        fetch_fail = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            fmap = {
+                executor.submit(self._fetch_concept_cons_one, name, code): (name, code)
+                for name, code in fetch_needed
+            }
+            for future in concurrent.futures.as_completed(fmap):
+                name, code = fmap[future]
+                try:
+                    data = future.result()
+                    if data is not None and not data.empty:
+                        result[code] = data
+                        fetch_ok += 1
+                    else:
+                        fetch_fail += 1
+                except Exception as exc:
+                    fetch_fail += 1
+                    logging.debug("概念成分股 %s(%s) 异常: %s", name, code, exc)
+
+        logging.info(
+            "概念成分股加载完成: %d个 (缓存%d, 新拉取%d, 失败%d)",
+            len(result), cached_hit, fetch_ok, fetch_fail,
+        )
+        return result
 
     # ══════════════════════════════════════════════
     #  热门板块成分股

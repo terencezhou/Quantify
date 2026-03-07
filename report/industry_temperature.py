@@ -587,7 +587,7 @@ class IndustryTemperature:
     @staticmethod
     def to_markdown(sectors: List[SectorHeat]) -> str:
         if not sectors:
-            return '### 热门行业\n\n暂无涨停集中的热点行业。\n'
+            return '### 板块热度排名\n\n暂无涨停集中的热点行业。\n'
 
         has_inflow = any(s.fund_source == 'sector_flow' for s in sectors)
 
@@ -600,7 +600,7 @@ class IndustryTemperature:
         sep_cols += '--------|--------|------|------|'
 
         lines = [
-            '### 热门行业 Top {}'.format(len(sectors)),
+            '### 板块热度排名 Top {}'.format(len(sectors)),
             '',
             header_cols,
             sep_cols,

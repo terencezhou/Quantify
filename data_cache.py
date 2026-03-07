@@ -88,7 +88,7 @@ class DataCache:
 
     def _ensure_dirs(self):
         for sub in ["daily", "fund_flow", "intraday", "chips", "financial",
-                    "hsgt_hold", "stock_info"]:
+                    "hsgt_hold", "stock_info", "concept_cons"]:
             path = os.path.join(self.cache_dir, sub)
             os.makedirs(path, exist_ok=True)
 
@@ -527,13 +527,50 @@ class DataCache:
         df.to_parquet(path, index=False)
 
     # ──────────────────────────────────────────────
+    #  概念板块成分股缓存（按概念板块，与日K线同周期更新）
+    #  新鲜度：检查 _fetched_at 列
+    # ──────────────────────────────────────────────
+
+    def get_concept_cons(self, concept_code):
+        path = self._parquet_path("concept_cons", concept_code)
+        if os.path.exists(path):
+            try:
+                return pd.read_parquet(path)
+            except Exception as e:
+                logging.warning(f"读取概念成分股缓存失败 {concept_code}: {e}")
+        return None
+
+    def is_concept_cons_fresh(self, concept_code):
+        """通过 _fetched_at 列判断概念成分股是否新鲜，与日K线同逻辑。"""
+        df = self.get_concept_cons(concept_code)
+        if df is None or df.empty or '_fetched_at' not in df.columns:
+            return False
+        return _is_fetched_at_fresh(df['_fetched_at'])
+
+    def save_concept_cons(self, concept_code, df):
+        if df is None or df.empty:
+            return
+        path = self._parquet_path("concept_cons", concept_code)
+        df.to_parquet(path, index=False)
+
+    def merge_concept_cons(self, concept_code, new_df):
+        if new_df is None or new_df.empty:
+            return self.get_concept_cons(concept_code)
+
+        new_df = new_df.copy()
+        new_df['_fetched_at'] = datetime.now()
+
+        self.save_concept_cons(concept_code, new_df)
+        return new_df
+
+    # ──────────────────────────────────────────────
     #  缓存清理
     # ──────────────────────────────────────────────
 
     def clear_all(self):
         import shutil
         for sub in ["daily", "fund_flow", "intraday", "chips", "financial",
-                    "hsgt_hold", "stock_info"]:
+                    "hsgt_hold", "stock_info", "concept_cons"]:
             path = os.path.join(self.cache_dir, sub)
             if os.path.exists(path):
                 shutil.rmtree(path)
@@ -548,7 +585,7 @@ class DataCache:
     def get_cache_stats(self):
         stats = {}
         for sub in ["daily", "fund_flow", "intraday", "chips", "financial",
-                    "hsgt_hold", "stock_info"]:
+                    "hsgt_hold", "stock_info", "concept_cons"]:
             path = os.path.join(self.cache_dir, sub)
             if os.path.exists(path):
                 files = [f for f in os.listdir(path) if f.endswith('.parquet')]
@@ -682,12 +719,13 @@ class DataCache:
         last_trade_day = self._calc_last_trade_day()
         return {
             'last_trade_day': last_trade_day.isoformat(),
-            'daily':       self._detail_daily(last_trade_day),
-            'fund_flow':   self._detail_per_stock_fetched_at('fund_flow'),
-            'intraday':    self._detail_per_stock_mtime('intraday', max_age_days=1),
-            'chips':       self._detail_per_stock_mtime('chips', max_age_days=3),
-            'hsgt_hold':   self._detail_per_stock_fetched_at('hsgt_hold'),
-            'stock_info':  self._detail_per_stock_mtime('stock_info', max_age_days=7),
+            'daily':         self._detail_daily(last_trade_day),
+            'fund_flow':     self._detail_per_stock_fetched_at('fund_flow'),
+            'intraday':      self._detail_per_stock_mtime('intraday', max_age_days=1),
+            'chips':         self._detail_per_stock_mtime('chips', max_age_days=3),
+            'hsgt_hold':     self._detail_per_stock_fetched_at('hsgt_hold'),
+            'stock_info':    self._detail_per_stock_mtime('stock_info', max_age_days=7),
+            'concept_cons':  self._detail_per_stock_fetched_at('concept_cons'),
             'snapshots': {
                 name: self._detail_snapshot(name)
                 for name in [

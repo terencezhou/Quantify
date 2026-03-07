@@ -31,6 +31,7 @@ fetch_sector_flow: true      # 行业板块资金流排行
 fetch_lhb_detail: true       # 龙虎榜详情（近30天）
 fetch_zt_pool: true          # 涨停池三件套（当日涨停+昨日涨停+强势股）
 fetch_concept_board: true    # 概念板块涨跌排行
+fetch_concept_cons: true     # 概念板块成分股（依赖 concept_board，逐概念并发拉取）
 fetch_chips: false           # 筹码分布（逐个股，首次拉取较慢）临时关闭加速测试
 fetch_hsgt_flow: true        # 北向/南向资金汇总
 fetch_financial: true        # 财务指标（季报数据，按天缓存，首次较慢）

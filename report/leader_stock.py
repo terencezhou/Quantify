@@ -63,6 +63,7 @@ class LeaderStock:
 
     seal_amount: float = 0.0        # 封板资金（元）
     first_seal_time: str = ''       # 首次封板时间
+    zhaban_count: int = 0           # 炸板次数
 
 
 # ══════════════════════════════════════════════════════════════
@@ -101,7 +102,6 @@ class LeaderStockFinder:
 
         prev_map = self._build_prev_map()
         seal_rank = self._rank_by_seal(candidates)
-        market_df = self.mt._get_market_df(self.mt._get_trade_date())
 
         results: List[LeaderStock] = []
         for _, row in candidates.iterrows():
@@ -123,11 +123,14 @@ class LeaderStockFinder:
             if '首次封板时间' in row.index:
                 ls.first_seal_time = str(row['首次封板时间']) if pd.notna(row['首次封板时间']) else ''
 
+            zhaban_count = int(row['炸板次数']) if '炸板次数' in row.index and pd.notna(row.get('炸板次数')) else 0
+            ls.zhaban_count = zhaban_count
+
             ls.score_lianban = self._score_lianban(lianban)
             ls.score_leading = self._score_leading(lianban, sh)
-            ls.score_seal = self._score_seal(code, seal_rank, market_df)
+            ls.score_seal = self._score_seal(code, seal_rank, zhaban_count)
             ls.score_confirm = self._score_confirm(
-                code, lianban, prev_map, ls.first_seal_time,
+                code, lianban, prev_map, ls.first_seal_time, sh,
             )
             ls.score_support = self._score_support(sh)
 
@@ -227,13 +230,18 @@ class LeaderStockFinder:
             return 25.0
         return 15.0
 
+    @staticmethod
     def _score_seal(
-        self,
         code: str,
         seal_rank: Dict[str, int],
-        market_df: Optional[pd.DataFrame],
+        zhaban_count: int = 0,
     ) -> float:
-        """维度 3：封板质量分（0-20）。3a 封板资金排名 + 3b 炸板回封。"""
+        """维度 3：封板质量分（0-20）。
+
+        3a 封板资金排名（0-12）
+        3b 炸板回封加分（0 或 +8）：炸板次数>=1 说明盘中炸过板但最终封住
+        3c 高炸板扣分（0 ~ -6）：炸板次数 >= 2 时扣分，分歧过大次日风险高
+        """
         rank = seal_rank.get(code, 999)
         if rank <= 3:
             score_a = 12.0
@@ -244,23 +252,18 @@ class LeaderStockFinder:
         else:
             score_a = 0.0
 
-        score_b = 0.0
-        if market_df is not None and not market_df.empty:
-            mkt_row = market_df[market_df['代码'].astype(str) == code]
-            if not mkt_row.empty:
-                mr = mkt_row.iloc[0]
-                low = pd.to_numeric(mr.get('最低'), errors='coerce')
-                prev_close = pd.to_numeric(mr.get('昨收'), errors='coerce')
-                close = pd.to_numeric(mr.get('最新价'), errors='coerce')
-                if pd.notna(low) and pd.notna(prev_close) and pd.notna(close) and prev_close > 0:
-                    from report.market_temperature import MarketTemperature
-                    code_s = pd.Series([code])
-                    zt_ratio = float(MarketTemperature._zt_limit_ratio(code_s).iloc[0])
-                    zt_price = round(prev_close * (1 + zt_ratio), 2)
-                    if low < zt_price and close >= zt_price:
-                        score_b = 8.0
+        # 3b: 炸板回封 — 直接使用 zt_pool 的炸板次数字段
+        score_b = 8.0 if zhaban_count >= 1 else 0.0
 
-        return score_a + score_b
+        # 3c: 高炸板扣分 — 炸板次数越多分歧越大，次日表现越不稳定
+        if zhaban_count >= 3:
+            score_c = -6.0
+        elif zhaban_count == 2:
+            score_c = -3.0
+        else:
+            score_c = 0.0
+
+        return max(0.0, min(20.0, score_a + score_b + score_c))
 
     @staticmethod
     def _score_confirm(
@@ -268,11 +271,13 @@ class LeaderStockFinder:
         lianban: int,
         prev_map: Dict[str, float],
         first_seal_time: str,
+        sector_heat: Optional['SectorHeat'] = None,
     ) -> float:
         """维度 4：身份确认分（0-15）。
 
-        连板股（≥2）：沿用昨日溢价逻辑。
-        首板股（=1）：用封板时间 + 竞价强度替代。
+        连板股（≥2）：昨日涨停溢价率，验证市场对其龙头身份的认可度。
+        首板股（=1）：封板时间（4a）+ 板块地位（4b'），首板不存在
+            "昨日溢价"数据，改为评估其在板块中的领先地位来确认潜力。
         """
         if lianban >= 2:
             chg = prev_map.get(code)
@@ -303,17 +308,18 @@ class LeaderStockFinder:
             except (ValueError, TypeError):
                 pass
 
-        # 4b: 竞价强度（0-7 分）— 如果该股在 prev_map 中存在
-        # prev_map 基于 zt_pool_previous，首板当日不存在，但
-        # 次日复盘时如果 zt_pool_previous 包含了昨日首板股的今日表现则可用
-        chg = prev_map.get(code)
-        if chg is not None and not pd.isna(chg):
-            if chg >= 5.0:
+        # 4b': 板块地位（0-7 分）— 替代连板股的"竞价强度"
+        # 首板当日不存在昨日溢价数据，改为评估该股在热门板块中的地位：
+        # 板块涨停数量越多且该股处于热门板块中，首板价值越高
+        if sector_heat is not None:
+            zt_n = sector_heat.zt_count
+            phase = sector_heat.phase
+            if zt_n >= 5 and phase in ('发酵', '高潮'):
                 score += 7.0
-            elif chg >= 3.0:
+            elif zt_n >= 4 and phase in ('启动', '发酵'):
                 score += 5.0
-            elif chg >= 0.0:
-                score += 2.0
+            elif zt_n >= 3:
+                score += 3.0
 
         return min(15.0, score)
 
@@ -377,6 +383,10 @@ class LeaderStockFinder:
             flags.append('市场高潮期，注意高潮后分歧')
         if market_score < 20:
             flags.append('市场冰点，极度谨慎')
+        if ls.zhaban_count >= 3:
+            flags.append(f'炸板{ls.zhaban_count}次，封板分歧大，次日不确定性高')
+        elif ls.zhaban_count == 2:
+            flags.append('炸板2次，封板有分歧')
         return flags
 
     # ── 操作建议矩阵 ─────────────────────────────────────────
@@ -453,18 +463,20 @@ class LeaderStockFinder:
         lines = [
             '### 龙头股追踪',
             '',
-            '| 级别 | 股票 | 行业 | 连板 | 封板时间 | 得分 | 周期 | 板块 | 操作建议 |',
-            '|------|------|------|------|---------|------|------|------|---------|',
+            '| 级别 | 股票 | 行业 | 连板 | 封板时间 | 炸板 | 得分 | 周期 | 板块 | 操作建议 |',
+            '|------|------|------|------|---------|------|------|------|------|---------|',
         ]
 
         for ls in show:
             seal_time = ls.first_seal_time if ls.first_seal_time else '—'
+            zhaban_str = str(ls.zhaban_count) if ls.zhaban_count > 0 else '—'
             lines.append(
                 f'| {ls.grade} '
                 f'| {ls.name}({ls.code}) '
                 f'| {ls.sector} '
                 f'| {ls.lianban}板 '
                 f'| {seal_time} '
+                f'| {zhaban_str} '
                 f'| {ls.score:.0f} '
                 f'| {ls.lifecycle} '
                 f'| {ls.sector_phase} '
