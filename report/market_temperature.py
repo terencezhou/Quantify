@@ -107,6 +107,9 @@ class TemperatureResult:
     # 龙头股追踪（由 LeaderStockFinder 填充）
     leader_stocks: list = field(default_factory=list)
 
+    # 概念板块热度（由 ConceptHotAnalyzer 填充）
+    concept_hot_result: Optional[object] = None
+
 
 # ══════════════════════════════════════════════════════════════
 #  主类
@@ -200,6 +203,14 @@ class MarketTemperature:
         except Exception as e:
             logging.warning('LeaderStockFinder 计算失败: %s', e)
             result.leader_stocks = []
+
+        # ── Step 7.5：概念板块热度分析 ──────────────────────────
+        from report.concept_hot import ConceptHotAnalyzer
+        try:
+            ch = ConceptHotAnalyzer(self.dm)
+            result.concept_hot_result = ch.run(top_n=20)
+        except Exception as e:
+            logging.warning('ConceptHotAnalyzer 计算失败: %s', e)
 
         # ── Step 8：情绪方向 + 策略适配提示 ──────────────────────
         U_prev, H_prev = self._derive_prev_metrics()
@@ -990,5 +1001,11 @@ class MarketTemperature:
                 market_score=result.score,
                 market_phase=result.phase,
             ))
+
+        # 概念板块热度
+        if result.concept_hot_result is not None:
+            from report.concept_hot import ConceptHotAnalyzer
+            lines.append('')
+            lines.append(ConceptHotAnalyzer.to_markdown(result.concept_hot_result))
 
         return '\n'.join(lines)

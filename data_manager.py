@@ -765,40 +765,42 @@ class DataManager:
     # ══════════════════════════════════════════════
 
     def _fetch_chips_one(self, code_name):
+        """拉取单只筹码，返回 (df, status)，status: 'cached'/'fetched'/'fail'。"""
         stock, name = code_name[0], code_name[1]
         if self._cache.is_chips_fresh(stock):
-            logging.info("筹码 %s(%s) 命中缓存", name, stock)
-            return self._cache.get_chips(stock)
+            return self._cache.get_chips(stock), 'cached'
 
         try:
             df = ak.stock_cyq_em(symbol=stock, adjust='qfq')
             if df is not None and not df.empty:
-                logging.warning("筹码 %s(%s) 拉取成功, %d 条", name, stock, len(df))
-                return self._cache.merge_chips(stock, df)
-            else:
-                logging.warning("筹码 %s(%s) 返回空数据", name, stock)
-        except Exception as e:
-            logging.warning("筹码 %s(%s) 拉取失败: %s", name, stock, e)
-        return self._cache.get_chips(stock)
+                return self._cache.merge_chips(stock, df), 'fetched'
+        except Exception:
+            pass
+        return self._cache.get_chips(stock), 'fail'
 
     def _run_chips(self, stocks):
         result = {}
-        ok, fail, cached = 0, 0, 0
+        cached, fetched, fail = 0, 0, 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             fmap = {executor.submit(self._fetch_chips_one, s): s for s in stocks}
             for future in concurrent.futures.as_completed(fmap):
                 stock = fmap[future]
                 try:
-                    data = future.result()
+                    data, status = future.result()
                     if data is not None:
                         result[stock] = data
-                        ok += 1
+                    if status == 'cached':
+                        cached += 1
+                    elif status == 'fetched':
+                        fetched += 1
                     else:
                         fail += 1
-                except Exception as exc:
+                except Exception:
                     fail += 1
-                    logging.warning("筹码 %s(%s) 异常: %s", stock[1], stock[0], exc)
-        logging.info("筹码分布加载完成: %d只 (成功%d, 失败%d)", len(result), ok, fail)
+        logging.info(
+            "筹码分布加载完成: %d只 (缓存命中%d, 新拉取%d, 失败%d)",
+            len(result), cached, fetched, fail,
+        )
         return result
 
     # ══════════════════════════════════════════════
