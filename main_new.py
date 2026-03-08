@@ -9,6 +9,12 @@
     # 持仓卖出信号分析
     python main_new.py sell
 
+    # 缩量主升浪选股
+    python main_new.py trend
+
+    # 底部十字星低估筹码流程
+    python main_new.py doji
+
     # 策略回测（暂未实现）
     python main_new.py backtest --strategy 放量上涨 --start 2024-01-01
 
@@ -266,6 +272,98 @@ def cmd_sell(config: dict, args):
 
 
 # ══════════════════════════════════════════════════════════
+#  子命令: trend（缩量主升浪选股）
+# ══════════════════════════════════════════════════════════
+
+def cmd_trend(config: dict, args):
+    """缩量主升浪 + 趋势持股：扫描全市场，输出观察池与买入信号"""
+    logging.info("=" * 60)
+    logging.info("缩量主升浪选股 启动  %s", datetime.now().strftime('%Y-%m-%d %H:%M'))
+    logging.info("=" * 60)
+
+    dm = DataManager(config)
+    dm.report_cache_status()
+    ok = dm.refresh()
+    if not ok:
+        logging.error("数据刷新失败，终止")
+        return
+
+    # 获取市场温度作为环境加分（可选）
+    market_score = 50.0
+    try:
+        from report.market_temperature import MarketTemperature
+        mt = MarketTemperature(dm)
+        mt_result = mt.run()
+        market_score = mt_result.score
+        logging.info("市场温度: %.1f (%s)", mt_result.score, mt_result.phase)
+    except Exception as e:
+        logging.warning("市场温度获取失败，使用默认值: %s", e)
+
+    from report.trend_surge import TrendSurgeScreener
+    screener = TrendSurgeScreener(dm)
+    result = screener.run(market_score=market_score)
+    report_md = screener.to_markdown(result)
+
+    import push
+    push.init(config)
+    push_cfg = config.get('push', {})
+    if push_cfg.get('enable', False):
+        try:
+            push.markdown(report_md)
+        except Exception as e:
+            logging.warning("推送失败: %s", e)
+    else:
+        print(report_md)
+
+    logging.info(
+        "选股完成: 观察池 %d 只, 买入信号 %d 只",
+        len(result.watch_pool), len(result.buy_candidates),
+    )
+    logging.info("=" * 60)
+
+
+# ══════════════════════════════════════════════════════════
+#  子命令: doji（底部十字星低估筹码流程）
+# ══════════════════════════════════════════════════════════
+
+def cmd_doji(config: dict, args):
+    """底部十字星 + 低估筹码流程：扫描全市场，输出今日新信号与确认信号"""
+    logging.info("=" * 60)
+    logging.info("底部十字星低估筹码流程 启动  %s", datetime.now().strftime('%Y-%m-%d %H:%M'))
+    logging.info("=" * 60)
+
+    dm = DataManager(config)
+    dm.report_cache_status()
+    ok = dm.refresh()
+    if not ok:
+        logging.error("数据刷新失败，终止")
+        return
+
+    from report.bottom_doji_flow import BottomDojiFlow
+    flow = BottomDojiFlow(dm)
+    result = flow.run()
+    report_md = flow.to_markdown(result)
+
+    import push
+    push.init(config)
+    push_cfg = config.get('push', {})
+    if push_cfg.get('enable', False):
+        try:
+            push.markdown(report_md)
+        except Exception as e:
+            logging.warning("推送失败: %s", e)
+            print(report_md)
+    else:
+        print(report_md)
+
+    logging.info(
+        "流程完成: 今日新信号 %d 只, 今日确认 %d 只",
+        len(result.today_signals), len(result.today_confirmed),
+    )
+    logging.info("=" * 60)
+
+
+# ══════════════════════════════════════════════════════════
 #  子命令: backtest
 # ══════════════════════════════════════════════════════════
 
@@ -356,6 +454,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument('--capital', type=float, default=100000,
                       help='初始资金')
 
+    # trend
+    p_trend = sub.add_parser('trend', help='缩量主升浪选股')
+    p_trend.add_argument('--cron', action='store_true',
+                         help='定时模式')
+    p_trend.add_argument('--time', default='15:15',
+                         help='定时执行时间')
+
+    # doji
+    p_doji = sub.add_parser('doji', help='底部十字星低估筹码流程')
+    p_doji.add_argument('--cron', action='store_true',
+                        help='定时模式')
+    p_doji.add_argument('--time', default='15:15',
+                        help='定时执行时间')
+
     # refresh
     sub.add_parser('refresh', help='仅刷新数据（不运行分析）')
 
@@ -383,6 +495,8 @@ def main():
     dispatch = {
         'buy':      cmd_buy,
         'sell':     cmd_sell,
+        'trend':    cmd_trend,
+        'doji':     cmd_doji,
         'backtest': cmd_backtest,
         'refresh':  cmd_refresh,
         'status':   cmd_status,
