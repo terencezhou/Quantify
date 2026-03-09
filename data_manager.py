@@ -953,7 +953,7 @@ class DataManager:
         logging.info("北向持股批量写入缓存: %d 只", saved)
         return result
 
-    def _run_hsgt_hold(self, stocks):
+    def _run_hsgt_hold(self, stocks):-
         """Layer-1 走缓存；缓存过期时整体批量拉取，剩余股票从缓存兜底。"""
         result = {}
         stale = []
