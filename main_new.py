@@ -26,6 +26,16 @@
 
     # 定时模式（每日15:15自动运行 buy）
     python main_new.py buy --cron
+
+数据加载模式（全局参数，所有子命令通用）：
+    # 默认：全量刷新（从远程拉取最新数据）
+    python main_new.py doji
+
+    # 快速模式：仅拉取实时行情，其余走本地缓存（适合盘中快速扫描）
+    python main_new.py doji --fast
+
+    # 纯缓存模式：不发起任何网络请求（适合二次分析 / 离线调试）
+    python main_new.py doji --no-refresh
 """
 
 import argparse
@@ -62,6 +72,34 @@ def load_config(config_path: str = None) -> dict:
 
 
 # ══════════════════════════════════════════════════════════
+#  DataManager 初始化（统一处理刷新模式）
+# ══════════════════════════════════════════════════════════
+
+def init_dm(config: dict, args) -> DataManager | None:
+    """根据 --fast / --no-refresh 选择合适的数据加载模式。
+
+    返回初始化好的 DataManager；加载失败返回 None。
+    """
+    dm = DataManager(config)
+    dm.report_cache_status()
+
+    no_refresh = getattr(args, 'no_refresh', False)
+    fast = getattr(args, 'fast', False)
+
+    if no_refresh:
+        ok = dm.load_from_cache()
+    elif fast:
+        ok = dm.refresh_fast()
+    else:
+        ok = dm.refresh()
+
+    if not ok:
+        logging.error("数据加载失败，终止")
+        return None
+    return dm
+
+
+# ══════════════════════════════════════════════════════════
 #  日志初始化
 # ══════════════════════════════════════════════════════════
 
@@ -93,7 +131,7 @@ def setup_logging(verbose: bool = False):
 # ══════════════════════════════════════════════════════════
 
 def cmd_refresh(config: dict, args):
-    """仅刷新数据，不运行分析"""
+    """仅刷新数据，不运行分析（始终走全量刷新）"""
     dm = DataManager(config)
     dm.report_cache_status()
     logging.info("开始数据刷新...")
@@ -173,12 +211,8 @@ def cmd_buy(config: dict, args):
     logging.info("Zhoumi 每日复盘 启动  %s", datetime.now().strftime('%Y-%m-%d %H:%M'))
     logging.info("=" * 60)
 
-    # Step 1: 数据刷新
-    dm = DataManager(config)
-    dm.report_cache_status()
-    ok = dm.refresh()
-    if not ok:
-        logging.error("数据刷新失败，终止")
+    dm = init_dm(config, args)
+    if dm is None:
         return
 
     # Step 2: 初始化推送
@@ -227,12 +261,8 @@ def cmd_sell(config: dict, args):
     logging.info("Zhoumi 持仓卖出决策分析 启动  %s", datetime.now().strftime('%Y-%m-%d %H:%M'))
     logging.info("=" * 60)
 
-    # Step 1: 全量刷新（三大上游报告需要全市场数据）
-    dm = DataManager(config)
-    dm.report_cache_status()
-    ok = dm.refresh()
-    if not ok:
-        logging.error("数据刷新失败，终止")
+    dm = init_dm(config, args)
+    if dm is None:
         return
 
     # Step 2: 运行三大上游报告（市场情绪 → 行业热度 → 龙头识别）
@@ -281,11 +311,8 @@ def cmd_trend(config: dict, args):
     logging.info("缩量主升浪选股 启动  %s", datetime.now().strftime('%Y-%m-%d %H:%M'))
     logging.info("=" * 60)
 
-    dm = DataManager(config)
-    dm.report_cache_status()
-    ok = dm.refresh()
-    if not ok:
-        logging.error("数据刷新失败，终止")
+    dm = init_dm(config, args)
+    if dm is None:
         return
 
     # 获取市场温度作为环境加分（可选）
@@ -332,15 +359,13 @@ def cmd_doji(config: dict, args):
     logging.info("底部十字星低估筹码流程 启动  %s", datetime.now().strftime('%Y-%m-%d %H:%M'))
     logging.info("=" * 60)
 
-    dm = DataManager(config)
-    dm.report_cache_status()
-    ok = dm.refresh()
-    if not ok:
-        logging.error("数据刷新失败，终止")
+    dm = init_dm(config, args)
+    if dm is None:
         return
 
     from report.bottom_doji_flow import BottomDojiFlow
-    flow = BottomDojiFlow(dm)
+    use_fast = getattr(args, 'fast', False)
+    flow = BottomDojiFlow(dm, fast_mode=use_fast)
     result = flow.run()
     report_md = flow.to_markdown(result)
 
@@ -373,10 +398,8 @@ def cmd_backtest(config: dict, args):
     logging.info("Sequoia 策略回测 启动")
     logging.info("=" * 60)
 
-    dm = DataManager(config)
-    ok = dm.refresh()
-    if not ok:
-        logging.error("数据刷新失败，终止回测")
+    dm = init_dm(config, args)
+    if dm is None:
         return
 
     from test_strategy import StrategyBacktester
@@ -429,8 +452,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest='command', help='子命令')
 
+    def _add_refresh_flags(p):
+        """为子命令添加 --fast / --no-refresh 互斥参数。"""
+        g = p.add_mutually_exclusive_group()
+        g.add_argument('-f', '--fast', action='store_true',
+                       help='快速模式：仅拉取实时行情，其余走本地缓存')
+        g.add_argument('-n', '--no-refresh', action='store_true',
+                       help='纯缓存模式：不发起任何网络请求')
+
     # buy
     p_buy = sub.add_parser('buy', help='全市场选股预测')
+    _add_refresh_flags(p_buy)
     p_buy.add_argument('--cron', action='store_true',
                        help='定时模式（每日15:15自动执行）')
     p_buy.add_argument('--time', default='15:15',
@@ -438,6 +470,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # sell
     p_sell = sub.add_parser('sell', help='持仓卖出信号分析')
+    _add_refresh_flags(p_sell)
     p_sell.add_argument('--cron', action='store_true',
                         help='定时模式')
     p_sell.add_argument('--time', default='15:15',
@@ -445,6 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # backtest
     p_bt = sub.add_parser('backtest', help='策略历史回测（开发中）')
+    _add_refresh_flags(p_bt)
     p_bt.add_argument('--strategy', default='放量上涨',
                       help='策略名称')
     p_bt.add_argument('--start', default='2024-01-01',
@@ -456,6 +490,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # trend
     p_trend = sub.add_parser('trend', help='缩量主升浪选股')
+    _add_refresh_flags(p_trend)
     p_trend.add_argument('--cron', action='store_true',
                          help='定时模式')
     p_trend.add_argument('--time', default='15:15',
@@ -463,12 +498,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # doji
     p_doji = sub.add_parser('doji', help='底部十字星低估筹码流程')
+    _add_refresh_flags(p_doji)
     p_doji.add_argument('--cron', action='store_true',
                         help='定时模式')
     p_doji.add_argument('--time', default='15:15',
                         help='定时执行时间')
 
-    # refresh
+    # refresh（始终全量刷新，不需要 --fast / --no-refresh）
     sub.add_parser('refresh', help='仅刷新数据（不运行分析）')
 
     # status

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 from dataclasses import dataclass, field
@@ -77,13 +78,15 @@ class BottomDojiFlow:
 
     CHIP_CONC_MAX = 0.06
 
-    def __init__(self, dm: DataManager):
+    def __init__(self, dm: DataManager, fast_mode: bool = False):
         self.dm = dm
         self._data_dir = dm.config.get('data_dir', 'stock_data')
         self._sector_map = self._load_sector_map()
         self._realtime_map = self._build_realtime_map()
         self._concept_map = self._build_concept_map()
         self._chips_map = self._build_chips_map()
+        self._fast_mode = fast_mode and bool(self._realtime_map)
+        self._today_str = self._resolve_fast_date() if self._fast_mode else ''
 
     def run(self) -> BottomDojiFlowResult:
         """扫描全市场，返回今日信号与今日确认。"""
@@ -105,9 +108,10 @@ class BottomDojiFlow:
         result.today_signals.sort(key=lambda x: (x.discount_pct, -x.chip_conc70_pct))
         result.today_confirmed.sort(key=lambda x: (x.confirm_pct, x.discount_pct), reverse=True)
 
+        mode_tag = '[快速]' if self._fast_mode else ''
         logging.info(
-            'BottomDojiFlow: 扫描%d只, 今日信号%d只, 今日确认%d只',
-            result.scanned, len(result.today_signals), len(result.today_confirmed),
+            'BottomDojiFlow%s: 扫描%d只, 今日信号%d只, 今日确认%d只',
+            mode_tag, result.scanned, len(result.today_signals), len(result.today_confirmed),
         )
         return result
 
@@ -128,6 +132,15 @@ class BottomDojiFlow:
         for col in ('开盘', '收盘', '最高', '最低', '成交额', '振幅', '涨跌幅', '换手率'):
             if col in work.columns:
                 work[col] = pd.to_numeric(work[col], errors='coerce')
+
+        if self._fast_mode and self._today_str:
+            last_date = str(work.iloc[-1]['日期'])[:10]
+            if last_date < self._today_str:
+                rt_kline = self._build_realtime_kline(code, self._today_str)
+                if rt_kline is not None:
+                    work = pd.concat(
+                        [work, pd.DataFrame([rt_kline])], ignore_index=True,
+                    )
 
         last_pos = len(work) - 1
         start = max(20, last_pos - 3)
@@ -240,11 +253,16 @@ class BottomDojiFlow:
         return None
 
     def _get_chip_raw(self, code: str, signal_date: str, close_p: float) -> Optional[dict]:
-        """读取信号日筹码条件。"""
+        """读取信号日筹码条件。fast_mode 下若当天无数据则回退到最近一天。"""
         cdf = self._chips_map.get(code)
         if cdf is None or cdf.empty:
             return None
-        sub = cdf[cdf['日期'].astype(str).str[:10] == signal_date]
+        date_col = cdf['日期'].astype(str).str[:10]
+        sub = cdf[date_col == signal_date]
+        if sub.empty and self._fast_mode:
+            earlier = cdf[date_col < signal_date]
+            if not earlier.empty:
+                sub = earlier.sort_values('日期').tail(1)
         if sub.empty:
             return None
         row = sub.iloc[-1]
@@ -372,8 +390,48 @@ class BottomDojiFlow:
             result[code] = df
         return result
 
+    def _resolve_fast_date(self) -> str:
+        """判断当前是否应使用今天日期合成 K 线。
+
+        工作日 9:00 之后视为"盘中或盘后"，realtime 反映当天行情，返回今天日期。
+        其余时段（凌晨、周末）realtime 仍是上一个交易日的数据，返回空字符串，
+        fast_mode 仅加速缓存加载，不合成当天 K 线。
+        """
+        now = datetime.datetime.now()
+        if now.weekday() < 5 and now.hour >= 9:
+            return now.date().isoformat()
+        return ''
+
+    def _build_realtime_kline(self, code: str, date_str: str) -> Optional[dict]:
+        """从实时快照构造一行与日K相同格式的数据。"""
+        rt = self._realtime_map.get(code)
+        if rt is None:
+            return None
+        open_p = pd.to_numeric(rt.get('今开'), errors='coerce')
+        close_p = pd.to_numeric(rt.get('最新价'), errors='coerce')
+        high_p = pd.to_numeric(rt.get('最高'), errors='coerce')
+        low_p = pd.to_numeric(rt.get('最低'), errors='coerce')
+        if pd.isna(open_p) or pd.isna(close_p) or pd.isna(high_p) or pd.isna(low_p):
+            return None
+        if open_p <= 0 or close_p <= 0:
+            return None
+        return {
+            '日期': date_str,
+            '开盘': float(open_p),
+            '收盘': float(close_p),
+            '最高': float(high_p),
+            '最低': float(low_p),
+            '成交量': float(pd.to_numeric(rt.get('成交量', 0), errors='coerce') or 0),
+            '成交额': float(pd.to_numeric(rt.get('成交额', 0), errors='coerce') or 0),
+            '涨跌幅': float(pd.to_numeric(rt.get('涨跌幅', 0), errors='coerce') or 0),
+            '振幅': float(pd.to_numeric(rt.get('振幅', 0), errors='coerce') or 0),
+            '换手率': float(pd.to_numeric(rt.get('换手率', 0), errors='coerce') or 0),
+        }
+
     def _get_trade_date(self) -> str:
-        """返回日K最新交易日。"""
+        """返回日K最新交易日。fast_mode 下返回今天日期。"""
+        if self._fast_mode and self._today_str:
+            return self._today_str
         for _key, df in self.dm.stocks_data.items():
             if df is not None and not df.empty and '日期' in df.columns:
                 return str(df['日期'].iloc[-1])[:10]

@@ -190,6 +190,126 @@ class DataManager:
         self._refreshed = bool(self._stocks_data)
         return self._refreshed
 
+    # ══════════════════════════════════════════════
+    #  快速 / 纯缓存 模式
+    # ══════════════════════════════════════════════
+
+    def refresh_fast(self) -> bool:
+        """快速模式：仅拉取实时行情，其余数据从本地缓存加载。"""
+        logging.info("===== DataManager: 快速刷新模式 =====")
+
+        self._all_data = self._fetch_realtime_quotes()
+        if self._all_data is None or self._all_data.empty:
+            logging.error("无法获取实时行情数据")
+            return False
+
+        active = self._all_data[
+            self._all_data['最新价'].notna() & (self._all_data['最新价'] > 0)
+        ]
+        subset = active[['代码', '名称']]
+        self._stocks = [tuple(x) for x in subset.values]
+        self._stocks = self._filter_by_market(self._stocks)
+
+        self._stocks_data = self._fallback_daily_from_cache(self._stocks)
+        if not self._stocks_data:
+            logging.error("日K缓存为空，快速模式失败")
+            return False
+
+        self._extra = self._load_extra_from_cache(self._stocks)
+        self._extra['realtime'] = self._all_data
+
+        self._refreshed = True
+        logging.info("===== DataManager: 快速刷新完成 (%d只) =====",
+                     len(self._stocks_data))
+        return True
+
+    def load_from_cache(self) -> bool:
+        """纯缓存模式：不发起任何网络请求，全部从本地缓存加载。"""
+        logging.info("===== DataManager: 纯缓存模式 =====")
+
+        self._all_data = self._cache.get_snapshot_latest("realtime_quotes")
+        if self._all_data is None or self._all_data.empty:
+            logging.error("缓存中无实时行情数据，请至少运行一次完整刷新")
+            return False
+
+        active = self._all_data[
+            self._all_data['最新价'].notna() & (self._all_data['最新价'] > 0)
+        ]
+        subset = active[['代码', '名称']]
+        self._stocks = [tuple(x) for x in subset.values]
+        self._stocks = self._filter_by_market(self._stocks)
+
+        self._stocks_data = self._fallback_daily_from_cache(self._stocks)
+        if not self._stocks_data:
+            logging.error("日K缓存为空")
+            return False
+
+        self._extra = self._load_extra_from_cache(self._stocks)
+        self._extra['realtime'] = self._all_data
+
+        self._refreshed = True
+        logging.info("===== DataManager: 缓存加载完成 (%d只) =====",
+                     len(self._stocks_data))
+        return True
+
+    def _load_extra_from_cache(self, stocks) -> dict:
+        """从缓存加载 extra 数据（快照 + 逐只数据）。"""
+        extra = {}
+
+        snapshot_keys = [
+            'sector_flow', 'concept_board', 'lhb_detail', 'zt_pool',
+            'zt_pool_previous', 'zt_pool_strong', 'hsgt_flow',
+            'financial_report', 'financial_balance', 'big_deal',
+        ]
+        for key in snapshot_keys:
+            cached = self._cache.get_snapshot_latest(key)
+            if cached is not None and not cached.empty:
+                extra[key] = cached
+
+        per_stock_sources = [
+            ('fetch_chips',      'chips',      self._cache.get_chips),
+            ('fetch_fund_flow',  'fund_flow',  self._cache.get_fund_flow),
+            ('fetch_intraday',   'intraday',   self._cache.get_intraday),
+            ('fetch_hsgt_hold',  'hsgt_hold',  self._cache.get_hsgt_hold),
+            ('fetch_stock_info', 'stock_info', self._cache.get_stock_info),
+        ]
+        for cfg_key, data_key, get_fn in per_stock_sources:
+            if self._config.get(cfg_key, False):
+                extra[data_key] = self._load_per_stock_cache(
+                    stocks, get_fn, data_key,
+                )
+
+        if self._config.get('fetch_concept_cons', False):
+            concept_df = extra.get('concept_board')
+            if concept_df is not None and not concept_df.empty:
+                cons = {}
+                for _, row in concept_df.iterrows():
+                    code = row.get('板块代码', '')
+                    if code:
+                        df = self._cache.get_concept_cons(code)
+                        if df is not None and not df.empty:
+                            cons[code] = df
+                if cons:
+                    extra['concept_cons'] = cons
+                    logging.info("概念成分股缓存加载: %d个板块", len(cons))
+
+        return extra
+
+    def _load_per_stock_cache(self, stocks, get_fn, label) -> dict:
+        """并发从缓存加载逐只数据。"""
+        result = {}
+
+        def _load_one(stock):
+            df = get_fn(stock[0])
+            return stock, df
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+            for stock, df in pool.map(_load_one, stocks):
+                if df is not None and not df.empty:
+                    result[stock] = df
+        logging.info("%s缓存加载: %d只", label, len(result))
+        return result
+
     def get_cache_status(self) -> CacheStatus:
         stats = self._cache.get_cache_stats()
         return CacheStatus(
