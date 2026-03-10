@@ -75,7 +75,7 @@ class BottomDojiFlowResult:
 class BottomDojiFlow:
     """底部十字星 + 低估筹码流程。"""
 
-    CHIP_CONC_MAX = 0.04
+    CHIP_CONC_MAX = 0.06
 
     def __init__(self, dm: DataManager):
         self.dm = dm
@@ -188,7 +188,7 @@ class BottomDojiFlow:
         if pd.isna(low20) or low20 <= 0:
             return None
         dist_low_pct = (low_p - low20) / low20 * 100
-        if dist_low_pct > 5:
+        if dist_low_pct > 10:
             return None
 
         prev_close_5 = df.iloc[pos - 5]['收盘']
@@ -214,12 +214,7 @@ class BottomDojiFlow:
             return None
 
         base_close = df.iloc[pos]['收盘']
-        doji_high = df.iloc[pos]['最高']
-        if pd.isna(base_close) or base_close <= 0 or pd.isna(doji_high):
-            return None
-
-        next_open = df.iloc[pos + 1]['开盘']
-        if pd.isna(next_open) or next_open <= doji_high:
+        if pd.isna(base_close) or base_close <= 0:
             return None
 
         base_vol = pd.to_numeric(df.iloc[pos].get('成交量'), errors='coerce')

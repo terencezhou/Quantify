@@ -781,7 +781,7 @@ class DataManager:
     def _run_chips(self, stocks):
         result = {}
         cached, fetched, fail = 0, 0, 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
             fmap = {executor.submit(self._fetch_chips_one, s): s for s in stocks}
             for future in concurrent.futures.as_completed(fmap):
                 stock = fmap[future]
@@ -953,7 +953,7 @@ class DataManager:
         logging.info("北向持股批量写入缓存: %d 只", saved)
         return result
 
-    def _run_hsgt_hold(self, stocks):-
+    def _run_hsgt_hold(self, stocks):
         """Layer-1 走缓存；缓存过期时整体批量拉取，剩余股票从缓存兜底。"""
         result = {}
         stale = []
