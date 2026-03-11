@@ -50,20 +50,28 @@ def compute_resistance(df: pd.DataFrame) -> pd.DataFrame:
     # 隔夜缺口
     w['gap_pct'] = (w['开盘'] - w['prev_close']) / w['prev_close'] * 100
 
-    # 日内方向
-    w['direction'] = np.sign(w['收盘'] - w['开盘']).astype(int)
+    # 方向：基于收盘价 vs 前一天收盘价（用涨跌幅判断，避免四舍五入精度问题）
+    chg_pct = (w['收盘'] - w['prev_close']) / w['prev_close'] * 100
+    w['direction'] = np.where(
+        chg_pct > 0.01, 1,
+        np.where(chg_pct < -0.01, -1, 0),
+    )
+    w['direction'] = w['direction'].fillna(0).astype(int)
 
     # 日类型
     w['day_type'] = w.apply(classify_day, axis=1)
 
-    # 日内振幅(%)
+    # 日内振幅(%) — 保留供参考
     w['range_pct'] = (w['最高'] - w['最低']) / w['最低'] * 100
 
-    # 日内阻力：一字板=0（极端易推动），其他=volume/range_pct
+    # 日内实体变动(%) = |收盘 - 开盘| / 开盘
+    w['body_pct'] = abs(w['收盘'] - w['开盘']) / w['开盘'] * 100
+
+    # 日内阻力：一字板=0，十字星(body_pct极小)=inf→用NaN，其他=volume/body_pct
     w['resistance'] = np.where(
         w['day_type'] == '一字板',
         0,
-        np.where(w['range_pct'] > 0, w['成交量'] / w['range_pct'], np.nan),
+        np.where(w['body_pct'] > 0.05, w['成交量'] / w['body_pct'], np.nan),
     )
 
     # 20日均阻力 & 相对阻力（排除一字板参与均值）
@@ -110,11 +118,12 @@ def print_report(w: pd.DataFrame, code: str, days: int):
     print(f"{'='*120}")
 
     cols = ['日期', '收盘', 'gap_pct', 'direction', 'day_type',
-            'range_pct', '成交量', 'resistance', 'rel_resistance',
+            'body_pct', 'range_pct', '成交量', 'resistance', 'rel_resistance',
             'res_pct', 'res_z']
     disp = show[cols].copy()
     disp['日期'] = disp['日期'].dt.strftime('%m-%d')
     disp['gap_pct'] = disp['gap_pct'].round(2)
+    disp['body_pct'] = disp['body_pct'].round(2)
     disp['range_pct'] = disp['range_pct'].round(2)
     disp['成交量'] = (disp['成交量'] / 1e4).round(1)
     disp['resistance'] = disp['resistance'].round(0)
@@ -123,7 +132,7 @@ def print_report(w: pd.DataFrame, code: str, days: int):
     disp['res_z'] = disp['res_z'].round(2)
 
     disp.columns = ['日期', '收盘', '缺口%', '方向', '类型',
-                    '振幅%', '量(万)', '阻力', '相对阻力',
+                    '实体%', '振幅%', '量(万)', '阻力', '相对阻力',
                     '百分位', 'Z值']
 
     dir_map = {1: '↑', -1: '↓', 0: '—'}
