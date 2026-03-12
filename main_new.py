@@ -389,6 +389,45 @@ def cmd_doji(config: dict, args):
 
 
 # ══════════════════════════════════════════════════════════
+#  子命令: doji2（箱体跌幅 + 底部十字星，宽松版）
+# ══════════════════════════════════════════════════════════
+
+def cmd_doji2(config: dict, args):
+    """箱体十字星流程：箱体跌幅≥20% + 7日内十字星 + 筹码低估 + 涨幅确认"""
+    logging.info("=" * 60)
+    logging.info("箱体十字星流程 启动  %s", datetime.now().strftime('%Y-%m-%d %H:%M'))
+    logging.info("=" * 60)
+
+    dm = init_dm(config, args)
+    if dm is None:
+        return
+
+    from report.box_doji_flow import BoxDojiFlow
+    use_fast = getattr(args, 'fast', False)
+    flow = BoxDojiFlow(dm, fast_mode=use_fast)
+    result = flow.run()
+    report_md = flow.to_markdown(result)
+
+    import push
+    push.init(config)
+    push_cfg = config.get('push', {})
+    if push_cfg.get('enable', False):
+        try:
+            push.markdown(report_md)
+        except Exception as e:
+            logging.warning("推送失败: %s", e)
+            print(report_md)
+    else:
+        print(report_md)
+
+    logging.info(
+        "流程完成: 近期候选 %d 只, 今日确认 %d 只",
+        len(result.recent_candidates), len(result.today_confirmed),
+    )
+    logging.info("=" * 60)
+
+
+# ══════════════════════════════════════════════════════════
 #  子命令: backtest
 # ══════════════════════════════════════════════════════════
 
@@ -497,12 +536,20 @@ def build_parser() -> argparse.ArgumentParser:
                          help='定时执行时间')
 
     # doji
-    p_doji = sub.add_parser('doji', help='底部十字星低估筹码流程')
+    p_doji = sub.add_parser('doji', help='底部十字星低估筹码流程（严格版）')
     _add_refresh_flags(p_doji)
     p_doji.add_argument('--cron', action='store_true',
                         help='定时模式')
     p_doji.add_argument('--time', default='15:15',
                         help='定时执行时间')
+
+    # doji2
+    p_doji2 = sub.add_parser('doji2', help='箱体十字星流程（宽松版：箱体跌幅+7日窗口）')
+    _add_refresh_flags(p_doji2)
+    p_doji2.add_argument('--cron', action='store_true',
+                         help='定时模式')
+    p_doji2.add_argument('--time', default='15:15',
+                         help='定时执行时间')
 
     # refresh（始终全量刷新，不需要 --fast / --no-refresh）
     sub.add_parser('refresh', help='仅刷新数据（不运行分析）')
@@ -533,6 +580,7 @@ def main():
         'sell':     cmd_sell,
         'trend':    cmd_trend,
         'doji':     cmd_doji,
+        'doji2':    cmd_doji2,
         'backtest': cmd_backtest,
         'refresh':  cmd_refresh,
         'status':   cmd_status,
