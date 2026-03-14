@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, date
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -34,6 +34,11 @@ try:
     from data_manager import DataManager
 except ModuleNotFoundError:
     from ..data_manager import DataManager  # type: ignore[no-redef]
+
+try:
+    from report.stock_group_calc import build_stock_concept_map
+except ModuleNotFoundError:
+    from stock_group_calc import build_stock_concept_map  # type: ignore[no-redef]
 
 
 MA_PERIODS = [5, 10, 20, 30]
@@ -78,6 +83,9 @@ class AlignmentResult:
     ma_spread_pct: float = 0.0  # 均线扩散度 (MA5-MA30)/MA30
     rise_5d_pct: float = 0.0    # 近5日累计涨幅
     chase_risk: str = ''        # "低" / "中" / "高"
+
+    # 概念/板块
+    concepts: List[str] = field(default_factory=list)
 
     @property
     def score_label(self) -> str:
@@ -418,6 +426,10 @@ class MAAlignmentDetector:
         """扫描全市场，返回目标日期所有首日回归的股票。"""
         result = ScanResult(target_date=target_date)
 
+        concept_map = build_stock_concept_map(
+            self.dm.extra.get('concept_cons', {})
+        )
+
         for (code, name), df in self.dm.stocks_data.items():
             result.total_scanned += 1
             code_str = str(code).zfill(6)
@@ -429,6 +441,7 @@ class MAAlignmentDetector:
             if ar is None:
                 continue
             if ar.is_first_day:
+                ar.concepts = concept_map.get(code_str, [])
                 result.items.append(ar)
 
         _risk_order = {"低": 0, "中": 1, "高": 2}
@@ -547,15 +560,16 @@ def format_scan_result(result: ScanResult) -> str:
     def _render_table(items: List[AlignmentResult], show_chase: bool = True):
         header = (
             "| # | 评分 | 风险 | 代码 | 名称 | 收盘 | 涨跌% "
-            "| 偏离MA5 | 扩散度 | 5日涨幅 | MA5斜率 |"
+            "| 偏离MA5 | 扩散度 | 5日涨幅 | MA5斜率 | 概念/板块 |"
         )
         sep = (
             "|---|------|------|------|------|------|-------"
-            "|---------|--------|---------|---------|"
+            "|---------|--------|---------|---------|-----------|"
         )
         lines.append(header)
         lines.append(sep)
         for i, ar in enumerate(items):
+            concepts_str = ' / '.join(ar.concepts[:3]) if ar.concepts else '—'
             lines.append(
                 f"| {i+1} "
                 f"| {ar.stars} "
@@ -567,7 +581,8 @@ def format_scan_result(result: ScanResult) -> str:
                 f"| {ar.bias5_pct:+.1f}% "
                 f"| {ar.ma_spread_pct:+.1f}% "
                 f"| {ar.rise_5d_pct:+.1f}% "
-                f"| {ar.ma5_slope_pct:+.2f}% |"
+                f"| {ar.ma5_slope_pct:+.2f}% "
+                f"| {concepts_str} |"
             )
         lines.append("")
 
@@ -592,12 +607,13 @@ def format_scan_result(result: ScanResult) -> str:
             % len(low_score)
         )
         lines.append(
-            "| # | 评分 | 风险 | 代码 | 名称 | 收盘 | 涨跌% | 偏离MA5 | 5日涨幅 |"
+            "| # | 评分 | 风险 | 代码 | 名称 | 收盘 | 涨跌% | 偏离MA5 | 5日涨幅 | 概念/板块 |"
         )
         lines.append(
-            "|---|------|------|------|------|------|-------|---------|---------|"
+            "|---|------|------|------|------|------|-------|---------|---------|-----------|"
         )
         for i, ar in enumerate(low_score):
+            concepts_str = ' / '.join(ar.concepts[:3]) if ar.concepts else '—'
             lines.append(
                 f"| {i+1} "
                 f"| {ar.stars} "
@@ -607,7 +623,8 @@ def format_scan_result(result: ScanResult) -> str:
                 f"| {ar.close:.2f} "
                 f"| {ar.change_pct:+.1f}% "
                 f"| {ar.bias5_pct:+.1f}% "
-                f"| {ar.rise_5d_pct:+.1f}% |"
+                f"| {ar.rise_5d_pct:+.1f}% "
+                f"| {concepts_str} |"
             )
         lines.append("\n</details>\n")
 

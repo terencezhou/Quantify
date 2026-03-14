@@ -516,3 +516,87 @@ def _cum_change(df: pd.DataFrame, pos: int, days: int) -> float:
     if pd.isna(close_end) or pd.isna(close_base) or close_base == 0:
         return 0.0
     return float((close_end - close_base) / close_base * 100)
+
+
+# ══════════════════════════════════════════════════════════════
+#  概念板块工具
+# ══════════════════════════════════════════════════════════════
+
+# 与具体行业/题材无关的平台性标签，反向构建时过滤掉
+CONCEPT_PLATFORM_TAGS: Set[str] = {
+    # 指数成份
+    '沪深300', '上证50', '中证500', '中证100', '中证1000',
+    '科创50', '创业板50', '深证100', '中小板指',
+    'MSCI中国', 'MSCI成份股', '富时罗素', '标普中国A股大中盘指数',
+    # 互联互通
+    '沪股通', '深股通', '港股通', '北向资金重仓',
+    # 融资交易
+    '融资融券', '可融资标的', '融资标的',
+    # 股权/回购/分红
+    '股权激励', '回购预案', '高股息', '参股银行', 'AB股',
+    # 机构/资金持仓标签
+    '机构重仓', '基金重仓', '社保重仓', '券商重仓', 'QFII重仓',
+    '外资持股', '北向持股',
+    # 财报/业绩类标签（与行业无关的时效性标签）
+    '2025中报扭亏', '2024中报扭亏', '2024年报扭亏', '2025年报扭亏',
+    '2025中报预增', '2024中报预增', '2025年报预增', '2024年报预增',
+    '业绩预增', '业绩扭亏', '高送转',
+    # 宏观/政策/地域概念（非行业题材）
+    '长江三角', '长三角', '珠三角', '京津冀', '粤港澳大湾区',
+    '雄安新区', '自贸区', '海南自贸港', '西部大开发',
+    '贬值受益', '升值受益', '通胀受益',
+    # 涨停/技术类标签
+    '昨日连板_含一字', '昨日涨停_含一字', '昨日首板', '昨日涨停',
+    '东方财富热股', '最近多板',
+    # 国资/治理类
+    '国企改革', '央企改革', '中字头', '国资委概念', '央企国资',
+    '混合所有制', '壳资源',
+}
+
+
+def build_stock_concept_map(
+    concept_cons: dict,
+    blacklist: Optional[Set[str]] = None,
+    max_per_stock: int = 5,
+) -> Dict[str, List[str]]:
+    """从 concept_cons 反向构建「股票代码 → 概念列表」映射。
+
+    Args:
+        concept_cons: DataManager.extra['concept_cons']，结构为
+                      {concept_code: DataFrame(含'代码'列, 可选'板块名称'列)}
+        blacklist:    需要过滤的平台性/非题材标签集合，默认使用 CONCEPT_PLATFORM_TAGS
+        max_per_stock: 每只股票最多保留的概念数量
+
+    Returns:
+        {stock_code_6digit: [concept_name, ...]}
+    """
+    if blacklist is None:
+        blacklist = CONCEPT_PLATFORM_TAGS
+
+    stock_concepts: Dict[str, List[str]] = {}
+
+    for concept_code, cons_df in concept_cons.items():
+        if cons_df is None or cons_df.empty or '代码' not in cons_df.columns:
+            continue
+
+        # 提取概念名称
+        if '板块名称' in cons_df.columns:
+            names = cons_df['板块名称'].dropna().unique()
+            concept_name = str(names[0]) if len(names) > 0 else str(concept_code)
+        else:
+            concept_name = str(concept_code)
+
+        if concept_name in blacklist:
+            continue
+
+        codes = cons_df['代码'].astype(str).str.zfill(6).tolist()
+        for code in codes:
+            stock_concepts.setdefault(code, [])
+            if concept_name not in stock_concepts[code]:
+                stock_concepts[code].append(concept_name)
+
+    # 每只股票取前 max_per_stock 个概念（保持原始顺序，即按概念遍历顺序）
+    return {
+        code: concepts[:max_per_stock]
+        for code, concepts in stock_concepts.items()
+    }

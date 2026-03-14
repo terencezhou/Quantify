@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -32,6 +32,11 @@ try:
     from data_manager import DataManager
 except ModuleNotFoundError:
     from ..data_manager import DataManager  # type: ignore[no-redef]
+
+try:
+    from report.stock_group_calc import build_stock_concept_map
+except ModuleNotFoundError:
+    from stock_group_calc import build_stock_concept_map  # type: ignore[no-redef]
 
 
 MA_PERIODS = [5, 10, 20, 30]
@@ -111,6 +116,9 @@ class PullbackItem:
     grade: str = 'C'
     rise_from_low_pct: float = 0.0
     is_realtime: bool = False
+
+    # 概念/板块
+    concepts: List[str] = field(default_factory=list)
 
     @property
     def grade_label(self) -> str:
@@ -342,10 +350,15 @@ class PullbackMA10Screener:
         if self.fast_mode:
             self._build_rt_lookup()
 
+        concept_map = build_stock_concept_map(
+            self.dm.extra.get('concept_cons', {})
+        )
+
         for key, df in self.dm.stocks_data.items():
             result.total_scanned += 1
             item = self._screen_one(key, df, market_score)
             if item is not None:
+                item.concepts = concept_map.get(item.code, [])
                 result.items.append(item)
 
         result.items.sort(key=lambda x: x.total_score, reverse=True)
@@ -725,14 +738,15 @@ def format_scan_result(result: PullbackScanResult) -> str:
     def _table(items: List[PullbackItem]):
         lines.append(
             '| # | 代码 | 名称 | 收盘 | 涨跌% | 量比 | 距MA10 | '
-            '粘合度 | MA10斜率 | 放量 | 评分 |'
+            '粘合度 | MA10斜率 | 放量 | 评分 | 概念/板块 |'
         )
         lines.append(
             '|---|------|------|------|-------|------|--------|'
-            '--------|---------|------|------|'
+            '--------|---------|------|------|-----------|'
         )
         for i, it in enumerate(items):
             rt_tag = '⚡' if it.is_realtime else ''
+            concepts_str = ' / '.join(it.concepts[:3]) if it.concepts else '—'
             lines.append(
                 f'| {i + 1} '
                 f'| {it.code} '
@@ -744,7 +758,8 @@ def format_scan_result(result: PullbackScanResult) -> str:
                 f'| {it.spread_10_20_pct:.1f}% '
                 f'| {it.slope_ma10_pct:+.1f}% '
                 f'| {it.surge_days}次 '
-                f'| **{it.total_score:.0f}** |'
+                f'| **{it.total_score:.0f}** '
+                f'| {concepts_str} |'
             )
         lines.append('')
 
