@@ -24,6 +24,21 @@
     # 查看缓存状态
     python main_new.py status
 
+    # 多头回踩MA10缩量阴线（标准模式，使用日K数据）
+    python main_new.py pullback
+
+    # 多头回踩MA10缩量阴线（快速模式，盘中/盘后用实时行情）
+    python main_new.py pullback -f
+
+    # 均线回归首日扫描（默认最新交易日）
+    python main_new.py ma_align
+
+    # 均线回归检测指定日期
+    python main_new.py ma_align --date 2025-03-10
+
+    # 均线回归检测单只股票
+    python main_new.py ma_align --date 2025-03-10 --code 600519
+
     # 定时模式（每日15:15自动运行 buy）
     python main_new.py buy --cron
 
@@ -428,6 +443,126 @@ def cmd_doji2(config: dict, args):
 
 
 # ══════════════════════════════════════════════════════════
+#  子命令: pullback（多头回踩MA10缩量阴线）
+# ══════════════════════════════════════════════════════════
+
+def cmd_pullback(config: dict, args):
+    """多头排列回踩MA10缩量阴线：扫描全市场趋势回踩买入信号
+
+    -f 模式：使用实时行情替代最新一日K线，适合盘中/盘后快速扫描。
+    非交易日运行时自动以上一个交易日为目标。
+    """
+    use_fast = getattr(args, 'fast', False)
+    mode_str = '⚡快速(实时)' if use_fast else '标准(K线)'
+
+    logging.info("=" * 60)
+    logging.info("多头回踩MA10缩量阴线 启动  %s  模式=%s",
+                 datetime.now().strftime('%Y-%m-%d %H:%M'), mode_str)
+    logging.info("=" * 60)
+
+    dm = init_dm(config, args)
+    if dm is None:
+        return
+
+    market_score = 50.0
+    try:
+        from report.market_temperature import MarketTemperature
+        mt = MarketTemperature(dm)
+        mt_result = mt.run()
+        market_score = mt_result.score
+        logging.info("市场温度: %.1f (%s)", mt_result.score, mt_result.phase)
+    except Exception as e:
+        logging.warning("市场温度获取失败，使用默认值: %s", e)
+
+    from report.pullback_ma10 import PullbackMA10Screener, format_scan_result
+    screener = PullbackMA10Screener(dm, fast_mode=use_fast)
+    result = screener.run(market_score=market_score)
+    report_md = format_scan_result(result)
+
+    import push
+    push.init(config)
+    push_cfg = config.get('push', {})
+    if push_cfg.get('enable', False):
+        try:
+            push.markdown(report_md)
+        except Exception as e:
+            logging.warning("推送失败: %s", e)
+    else:
+        print(report_md)
+
+    logging.info(
+        "扫描完成: 信号 %d 只 (S=%d A=%d B=%d)",
+        len(result.items),
+        len(result.s_items), len(result.a_items), len(result.b_items),
+    )
+    logging.info("=" * 60)
+
+
+# ══════════════════════════════════════════════════════════
+#  子命令: ma_align（均线回归首日扫描）
+# ══════════════════════════════════════════════════════════
+
+def cmd_ma_align(config: dict, args):
+    """均线回归首日扫描：检测指定日期全市场（或单只）的均线回归信号"""
+    logging.info("=" * 60)
+    logging.info("均线回归首日扫描 启动  %s", datetime.now().strftime('%Y-%m-%d %H:%M'))
+    logging.info("=" * 60)
+
+    dm = init_dm(config, args)
+    if dm is None:
+        return
+
+    from report.ma_alignment import (
+        MAAlignmentDetector, parse_date,
+        format_single_result, format_scan_result,
+    )
+
+    detector = MAAlignmentDetector(dm)
+
+    target_date = getattr(args, 'date', None)
+    if target_date:
+        target_date = parse_date(target_date)
+    else:
+        target_date = detector.get_latest_trade_date()
+
+    stock_code = getattr(args, 'code', None)
+
+    if stock_code:
+        ar = detector.check_by_code(stock_code, target_date)
+        if ar is None:
+            print(f"\n未找到 {stock_code} 的数据或数据不足，无法检测。")
+            return
+        report_text = format_single_result(ar)
+        print(f"\n{report_text}")
+        logging.info(
+            "检测完成: %s(%s) 日期=%s 回归=%s 首日=%s 评分=%d",
+            ar.name, ar.code, ar.target_date,
+            ar.is_alignment, ar.is_first_day, ar.score,
+        )
+    else:
+        result = detector.scan(target_date)
+        report_md = format_scan_result(result)
+
+        import push
+        push.init(config)
+        push_cfg = config.get('push', {})
+        if push_cfg.get('enable', False):
+            try:
+                push.markdown(report_md)
+            except Exception as e:
+                logging.warning("推送失败: %s", e)
+        else:
+            print(report_md)
+
+        logging.info(
+            "扫描完成: 共 %d 只, 首日回归 %d 只",
+            result.total_scanned, len(result.items),
+        )
+
+    logging.info("=" * 60)
+
+
+# ══════════════════════════════════════════════════════════
 #  子命令: backtest
 # ══════════════════════════════════════════════════════════
 
@@ -543,6 +678,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_doji.add_argument('--time', default='15:15',
                         help='定时执行时间')
 
+    # ma_align
+    p_ma = sub.add_parser('ma_align', help='均线回归首日扫描（MA5>MA10>MA20>MA30多头排列）')
+    _add_refresh_flags(p_ma)
+    p_ma.add_argument('--date', '-d', default=None,
+                       help='检测日期（默认最新交易日），支持 YYYY-MM-DD / YYYYMMDD / YYYY/MM/DD')
+    p_ma.add_argument('--code', default=None,
+                       help='指定股票代码（如 600519），不指定则全市场扫描')
+    p_ma.add_argument('--cron', action='store_true',
+                       help='定时模式')
+    p_ma.add_argument('--time', default='15:15',
+                       help='定时执行时间')
+
+    # pullback
+    p_pb = sub.add_parser('pullback', help='多头回踩MA10缩量阴线策略（趋势回踩买入）')
+    _add_refresh_flags(p_pb)
+    p_pb.add_argument('--code', default=None,
+                      help='指定股票代码（如 601012），不指定则全市场扫描')
+    p_pb.add_argument('--cron', action='store_true',
+                      help='定时模式')
+    p_pb.add_argument('--time', default='15:15',
+                      help='定时执行时间')
+
     # doji2
     p_doji2 = sub.add_parser('doji2', help='箱体十字星流程（宽松版：箱体跌幅+7日窗口）')
     _add_refresh_flags(p_doji2)
@@ -581,6 +738,8 @@ def main():
         'trend':    cmd_trend,
         'doji':     cmd_doji,
         'doji2':    cmd_doji2,
+        'pullback': cmd_pullback,
+        'ma_align': cmd_ma_align,
         'backtest': cmd_backtest,
         'refresh':  cmd_refresh,
         'status':   cmd_status,
