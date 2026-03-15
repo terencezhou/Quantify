@@ -7,9 +7,9 @@
 设计文档: docs/pullback_ma10_strategy.md
 
 四大核心条件:
-    1. 均线多头排列 + 斜率向上且温和 (MA5>MA10>MA20>MA30, 0.5%<=slope_ma10<=4%, slope_ma5<=6%)
-    2. 均线粘合度 — MA10距MA20<=5%, 距MA30<=8%
-    3. 当日缩量阴线 + 回踩MA10附近 (vol_ratio<0.8, 阴线, 实体<3%, 距MA10±2%)
+    1. 均线多头排列 + 斜率向上且温和 (MA5>MA10>MA20>MA30, 0.5%<=slope_ma10<=5%, slope_ma5<=7%)
+    2. 均线粘合度 — MA10距MA20<=6.5%, 距MA30<=10%
+    3. 当日缩量阴线 + 回踩MA10附近 (vol_ratio<0.8, 阴线, 收盘高于MA10<=2%/低于MA10<=3%)
     4. 过去20日有放量上涨 (涨幅>=3% 且 量>=MA20量×1.5)
 
 快速模式 (-f):
@@ -49,11 +49,12 @@ MIN_DATA_LEN = 60
 SLOPE_MA10_MIN = 0.5      # MA10 斜率下限 (%)
 SLOPE_MA10_MAX = 5.0      # MA10 斜率上限 (%)
 SLOPE_MA5_MAX = 7.0       # MA5 斜率上限 (%)
-SPREAD_10_20_MAX = 5.0    # MA10-MA20 粘合度上限 (%)
-SPREAD_10_30_MAX = 8.0    # MA10-MA30 粘合度上限 (%)
+SPREAD_10_20_MAX = 6.5    # MA10-MA20 粘合度上限 (%)
+SPREAD_10_30_MAX = 10.0   # MA10-MA30 粘合度上限 (%)
 VOL_RATIO_MAX = 0.8       # 缩量比上限
 BODY_PCT_MAX = 7.0        # 阴线实体上限 (%)
-DIST_MA10_MAX = 2.0       # 距MA10距离上限 (%)
+DIST_MA10_ABOVE_MAX = 2.0  # 收盘高于MA10的距离上限 (%)
+DIST_MA10_BELOW_MAX = 3.0  # 收盘低于MA10的距离上限 (%)
 SURGE_CHANGE_MIN = 3.0    # 放量上涨涨幅下限 (%)
 SURGE_VOL_MULT = 1.5      # 放量上涨量倍数
 SURGE_LOOKBACK = 20       # 放量上涨回看天数
@@ -463,7 +464,7 @@ class PullbackMA10Screener:
             return None
 
         dist_to_ma10 = (close_val - ma_vals[10]) / ma_vals[10] * 100
-        if abs(dist_to_ma10) > DIST_MA10_MAX:
+        if dist_to_ma10 > DIST_MA10_ABOVE_MAX or dist_to_ma10 < -DIST_MA10_BELOW_MAX:
             return None
 
         # 价格必须离 MA10 比离 MA5 更近，才算真正回踩到 MA10
