@@ -1,16 +1,19 @@
 # -*- encoding: UTF-8 -*-
 
-"""多头排列回踩MA10缩量阴线 — 趋势回踩买入策略
+"""多头排列回踩MA10/MA20缩量阴线 — 趋势回踩买入策略
 
-对全市场日K数据进行扫描，找出满足「多头排列 + 缩量阴线回踩MA10」条件的股票。
+对全市场日K数据进行扫描，找出满足「多头排列 + 缩量阴线回踩MA10或MA20」条件的股票。
 
 设计文档: docs/pullback_ma10_strategy.md
 
 四大核心条件:
     1. 均线多头排列 + 斜率向上且温和 (MA5>MA10>MA20>MA30, 0.5%<=slope_ma10<=5%, slope_ma5<=7%)
     2. 均线粘合度 — MA10距MA20<=6.5%, 距MA30<=10%
-    3. 当日缩量阴线 + 回踩MA10附近 (vol_ratio<0.8, 阴线, 收盘高于MA10<=2%/低于MA10<=3%)
+    3. 当日缩量阴线 + 回踩MA10附近(+2%/-3%) 或 MA20附近(±2%)
     4. 过去20日有放量上涨 (涨幅>=3% 且 量>=MA20量×1.5)
+
+附加指标:
+    - 20日最大回撤: 过去20个交易日中，最低价距MA20的最大下偏幅度
 
 快速模式 (-f):
     使用实时行情数据替代最新一日K线，适合盘中/盘后快速扫描。
@@ -53,8 +56,10 @@ SPREAD_10_20_MAX = 6.5    # MA10-MA20 粘合度上限 (%)
 SPREAD_10_30_MAX = 10.0   # MA10-MA30 粘合度上限 (%)
 VOL_RATIO_MAX = 0.8       # 缩量比上限
 BODY_PCT_MAX = 7.0        # 阴线实体上限 (%)
-DIST_MA10_ABOVE_MAX = 2.0  # 收盘高于MA10的距离上限 (%)
-DIST_MA10_BELOW_MAX = 3.0  # 收盘低于MA10的距离上限 (%)
+DIST_MA10_ABOVE_MAX = 2.0  # 回踩MA10: 收盘高于MA10的距离上限 (%)
+DIST_MA10_BELOW_MAX = 3.0  # 回踩MA10: 收盘低于MA10的距离上限 (%)
+DIST_MA20_ABOVE_MAX = 2.0  # 回踩MA20: 收盘高于MA20的距离上限 (%)
+DIST_MA20_BELOW_MAX = 2.0  # 回踩MA20: 收盘低于MA20的距离上限 (%)
 SURGE_CHANGE_MIN = 3.0    # 放量上涨涨幅下限 (%)
 SURGE_VOL_MULT = 1.5      # 放量上涨量倍数
 SURGE_LOOKBACK = 20       # 放量上涨回看天数
@@ -99,7 +104,10 @@ class PullbackItem:
     vol_ratio: float = 0.0
     body_pct: float = 0.0
     dist_to_ma10_pct: float = 0.0
+    dist_to_ma20_pct: float = 0.0
+    pullback_target: str = 'MA10'
     low_touch_ma10: bool = False
+    max_drawdown_ma20_pct: float = 0.0
 
     # 放量历史
     surge_days: int = 0
@@ -464,16 +472,25 @@ class PullbackMA10Screener:
             return None
 
         dist_to_ma10 = (close_val - ma_vals[10]) / ma_vals[10] * 100
-        if dist_to_ma10 > DIST_MA10_ABOVE_MAX or dist_to_ma10 < -DIST_MA10_BELOW_MAX:
+        dist_to_ma20 = (close_val - ma_vals[20]) / ma_vals[20] * 100
+
+        near_ma10 = (
+            -DIST_MA10_BELOW_MAX <= dist_to_ma10 <= DIST_MA10_ABOVE_MAX
+            and abs(close_val - ma_vals[10]) <= abs(close_val - ma_vals[5])
+        )
+        near_ma20 = (
+            -DIST_MA20_BELOW_MAX <= dist_to_ma20 <= DIST_MA20_ABOVE_MAX
+            and abs(close_val - ma_vals[20]) <= abs(close_val - ma_vals[10])
+        )
+
+        if not (near_ma10 or near_ma20):
             return None
 
-        # 价格必须离 MA10 比离 MA5 更近，才算真正回踩到 MA10
-        dist_to_ma5 = abs(close_val - ma_vals[5])
-        dist_to_ma10_abs = abs(close_val - ma_vals[10])
-        if dist_to_ma5 < dist_to_ma10_abs:
-            return None
+        pullback_target = 'MA10' if near_ma10 else 'MA20'
+        target_ma_val = ma_vals[10] if near_ma10 else ma_vals[20]
+        dist_to_target = dist_to_ma10 if near_ma10 else dist_to_ma20
 
-        low_touch = low_val < ma_vals[10] and close_val >= ma_vals[10] * 0.99
+        low_touch = low_val < target_ma_val and close_val >= target_ma_val * 0.99
 
         # ── 条件 4: 过去20日有放量上涨 ──
         surge_days, max_surge_pct, days_since = self._count_surge_days(
@@ -503,10 +520,13 @@ class PullbackMA10Screener:
         if rise_from_low > RISE_FROM_LOW_MAX:
             return None
 
+        # ── 20日最大回撤(距MA20) ──
+        max_dd_ma20 = self._max_drawdown_from_ma20(lows, ma_dict[20], pos, 20)
+
         # ── 评分 ──
         s_a = _score_ma_quality(ma_up_count, slope_ma10, slope_ma5)
         s_b = _score_cohesion(spread_10_20, spread_10_30, spread_20_30)
-        s_c = _score_pullback(vol_ratio, body_pct, abs(dist_to_ma10), low_touch)
+        s_c = _score_pullback(vol_ratio, body_pct, abs(dist_to_target), low_touch)
         s_d = _score_surge_hist(surge_days, max_surge_pct, days_since)
         s_e = _score_env(market_score)
 
@@ -538,7 +558,10 @@ class PullbackMA10Screener:
             vol_ratio=round(vol_ratio, 2),
             body_pct=round(body_pct, 2),
             dist_to_ma10_pct=round(dist_to_ma10, 2),
+            dist_to_ma20_pct=round(dist_to_ma20, 2),
+            pullback_target=pullback_target,
             low_touch_ma10=low_touch,
+            max_drawdown_ma20_pct=round(max_dd_ma20, 1),
             surge_days=surge_days,
             max_surge_pct=round(max_surge_pct, 1),
             days_since_surge=days_since,
@@ -605,6 +628,24 @@ class PullbackMA10Screener:
             if not (vals[0] > vals[1] > vals[2] > vals[3]):
                 return False
         return True
+
+    # ── 20日最大回撤(距MA20) ──
+
+    @staticmethod
+    def _max_drawdown_from_ma20(
+        lows: np.ndarray, ma20_arr: np.ndarray, pos: int, days: int,
+    ) -> float:
+        """过去 N 日内最低价距 MA20 的最大下偏幅度 (%)，返回负值表示跌破。"""
+        start = max(0, pos - days + 1)
+        worst = 0.0
+        for i in range(start, pos + 1):
+            ma20_val = ma20_arr[i]
+            if np.isnan(ma20_val) or ma20_val <= 0:
+                continue
+            dd = (lows[i] - ma20_val) / ma20_val * 100
+            if dd < worst:
+                worst = dd
+        return worst
 
     # ── 距低点涨幅 ──
 
@@ -722,7 +763,7 @@ def format_scan_result(result: PullbackScanResult) -> str:
     """生成 Markdown 格式报告。"""
     lines: List[str] = []
     mode_tag = ' ⚡实时' if result.is_fast_mode else ''
-    lines.append(f'## 多头回踩MA10缩量阴线{mode_tag} ({result.trade_date})')
+    lines.append(f'## 多头回踩MA10/MA20缩量阴线{mode_tag} ({result.trade_date})')
     lines.append('')
     lines.append(
         f'> 扫描 {result.total_scanned} 只（排除ST/北交所/科创/创业板）'
@@ -732,22 +773,25 @@ def format_scan_result(result: PullbackScanResult) -> str:
     lines.append('')
 
     if not result.items:
-        lines.append('*当前无满足回踩MA10条件的标的。*')
+        lines.append('*当前无满足回踩MA10/MA20条件的标的。*')
         lines.append('')
         return '\n'.join(lines)
 
     def _table(items: List[PullbackItem]):
         lines.append(
-            '| # | 代码 | 名称 | 收盘 | 涨跌% | 量比 | 距MA10 | '
-            '粘合度 | MA10斜率 | 放量 | 评分 | 概念/板块 |'
+            '| # | 代码 | 名称 | 收盘 | 涨跌% | 量比 | 回踩 | '
+            '粘合度 | MA10斜率 | 放量 | 20日回撤 | 评分 | 概念/板块 |'
         )
         lines.append(
-            '|---|------|------|------|-------|------|--------|'
-            '--------|---------|------|------|-----------|'
+            '|---|------|------|------|-------|------|------|'
+            '--------|---------|------|---------|------|-----------|'
         )
         for i, it in enumerate(items):
             rt_tag = '⚡' if it.is_realtime else ''
             concepts_str = ' / '.join(it.concepts[:3]) if it.concepts else '—'
+            dist_pct = it.dist_to_ma10_pct if it.pullback_target == 'MA10' else it.dist_to_ma20_pct
+            pullback_label = f'{it.pullback_target}{dist_pct:+.1f}%'
+            dd_label = f'{it.max_drawdown_ma20_pct:.1f}%' if it.max_drawdown_ma20_pct < 0 else '—'
             lines.append(
                 f'| {i + 1} '
                 f'| {it.code} '
@@ -755,10 +799,11 @@ def format_scan_result(result: PullbackScanResult) -> str:
                 f'| {it.close:.2f} '
                 f'| {it.change_pct:+.1f}% '
                 f'| {it.vol_ratio:.2f} '
-                f'| {it.dist_to_ma10_pct:+.1f}% '
+                f'| {pullback_label} '
                 f'| {it.spread_10_20_pct:.1f}% '
                 f'| {it.slope_ma10_pct:+.1f}% '
                 f'| {it.surge_days}次 '
+                f'| {dd_label} '
                 f'| **{it.total_score:.0f}** '
                 f'| {concepts_str} |'
             )
@@ -784,14 +829,16 @@ def format_scan_result(result: PullbackScanResult) -> str:
 
     if result.items:
         top = result.items[0]
+        t_dist = top.dist_to_ma10_pct if top.pullback_target == 'MA10' else top.dist_to_ma20_pct
         lines.append('> **信号解读示例**')
         lines.append(
             f'> {top.name}({top.code}): MA均线多头排列{top.ma_up_count}线向上, '
             f'MA10斜率{top.slope_ma10_pct:+.1f}%, '
             f'MA10-MA20粘合{top.spread_10_20_pct:.1f}%, '
-            f'今日缩量{top.vol_ratio:.2f}倍小阴线回踩MA10({top.dist_to_ma10_pct:+.1f}%), '
+            f'今日缩量{top.vol_ratio:.2f}倍小阴线回踩{top.pullback_target}({t_dist:+.1f}%), '
             f'近{SURGE_LOOKBACK}日{top.surge_days}次放量上涨'
-            f'(最大{top.max_surge_pct:.1f}%)'
+            f'(最大{top.max_surge_pct:.1f}%), '
+            f'20日最大回撤{top.max_drawdown_ma20_pct:.1f}%(距MA20)'
         )
         lines.append('')
 
