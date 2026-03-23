@@ -524,10 +524,11 @@ def _cum_change(df: pd.DataFrame, pos: int, days: int) -> float:
 
 # 与具体行业/题材无关的平台性标签，反向构建时过滤掉
 CONCEPT_PLATFORM_TAGS: Set[str] = {
-    # 指数成份
+    # 指数成份（含变体: HS300_ / 深证100R 等）
     '沪深300', '上证50', '上证180', '上证380', '中证500', '中证100', '中证1000',
-    '科创50', '创业板50', '深证100', '深成500', '中小板指',
+    '科创50', '创业板50', '深证100', '深证100R', '深成500', '中小板指',
     'MSCI中国', 'MSCI成份股', '富时罗素', '标普中国A股大中盘指数',
+    'HS300_', '上证50_', '中证500_', '中证1000_',
     # 互联互通
     '沪股通', '深股通', '港股通', '北向资金重仓',
     # 融资/转债
@@ -536,8 +537,8 @@ CONCEPT_PLATFORM_TAGS: Set[str] = {
     '股权激励', '回购预案', '高股息', '红利股', 'AB股',
     # 参股类（非主业）
     '参股银行', '参股券商', '参股期货', '参股保险', '参股基金',
-    # 市值/盘面标签
-    '大盘股', '小盘股', '微盘股',
+    # 市值/盘面/风格标签
+    '大盘股', '小盘股', '微盘股', '周期股', '蓝筹股', '白马股',
     # 机构/资金持仓标签
     '机构重仓', '基金重仓', '社保重仓', '券商重仓', 'QFII重仓',
     '外资持股', '北向持股', '养老金',
@@ -559,6 +560,13 @@ CONCEPT_PLATFORM_TAGS: Set[str] = {
     # 指数/评级机构成份
     '证金持股', '标准普尔', '标普',
 }
+
+# 前缀匹配黑名单：概念名以这些开头的也过滤
+_CONCEPT_BLACKLIST_PREFIXES = (
+    'HS300', 'HS500', '上证50_', '中证', '深证', '沪深300_',
+    '昨日连板', '昨日涨停', '昨日首板', '昨日高振幅',
+    '2024', '2025', '2026',
+)
 
 
 def build_stock_concept_map(
@@ -594,6 +602,8 @@ def build_stock_concept_map(
             concept_name = str(concept_code)
 
         if concept_name in blacklist:
+            continue
+        if concept_name.startswith(_CONCEPT_BLACKLIST_PREFIXES):
             continue
 
         codes = cons_df['代码'].astype(str).str.zfill(6).tolist()
