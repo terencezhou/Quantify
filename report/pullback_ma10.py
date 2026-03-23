@@ -63,6 +63,7 @@ SURGE_VOL_MULT = 1.5      # 放量上涨量倍数
 SURGE_LOOKBACK = 20       # 放量上涨回看天数
 RISE_FROM_LOW_MAX = 0.40  # 距60日低点涨幅上限
 ALIGN_PERSIST_MIN = 3     # 多头排列最少持续天数
+ALIGN_MA20_30_TOL = 0.3   # MA20与MA30接近时的容差 (%): MA20 >= MA30*(1-tol) 视为通过
 
 
 # ══════════════════════════════════════════════════════════════
@@ -398,6 +399,15 @@ def _is_excluded(code: str, name: str) -> bool:
     return False
 
 
+def _is_bullish_aligned(ma5: float, ma10: float, ma20: float, ma30: float) -> bool:
+    """多头排列判断: MA5>MA10>MA20>MA30，MA20与MA30接近时允许容差。"""
+    if not (ma5 > ma10 > ma20):
+        return False
+    if ma20 > ma30:
+        return True
+    return ma20 >= ma30 * (1 - ALIGN_MA20_30_TOL / 100)
+
+
 # ══════════════════════════════════════════════════════════════
 #  评分函数
 # ══════════════════════════════════════════════════════════════
@@ -618,7 +628,7 @@ class PullbackMA10Screener:
             ma_vals[p] = v
 
         # ── 条件 1: 均线多头排列 + 斜率温和 ──
-        if not (ma_vals[5] > ma_vals[10] > ma_vals[20] > ma_vals[30]):
+        if not _is_bullish_aligned(ma_vals[5], ma_vals[10], ma_vals[20], ma_vals[30]):
             return None
 
         # MA10 斜率 (T vs T-1)
@@ -833,7 +843,7 @@ class PullbackMA10Screener:
                 if np.isnan(v):
                     return False
                 vals.append(v)
-            if not (vals[0] > vals[1] > vals[2] > vals[3]):
+            if not _is_bullish_aligned(vals[0], vals[1], vals[2], vals[3]):
                 return False
         return True
 
