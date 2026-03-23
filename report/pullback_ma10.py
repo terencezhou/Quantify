@@ -124,6 +124,12 @@ class PullbackItem:
     rise_from_low_pct: float = 0.0
     is_realtime: bool = False
 
+    # 附加信号
+    top_divergence: bool = False
+    divergence_detail: str = ''
+    triangle_support: bool = False
+    triangle_detail: str = ''
+
     # 概念/板块
     concepts: List[str] = field(default_factory=list)
 
@@ -173,6 +179,207 @@ def _compute_ma(arr: np.ndarray, period: int) -> np.ndarray:
 
 def _compute_all_ma(closes: np.ndarray) -> Dict[int, np.ndarray]:
     return {p: _compute_ma(closes, p) for p in MA_PERIODS}
+
+
+# ══════════════════════════════════════════════════════════════
+#  MACD 顶背离检测
+# ══════════════════════════════════════════════════════════════
+
+DIVERGENCE_LOOKBACK = 40   # 回看窗口 (交易日)
+PEAK_NEIGHBOR = 3          # 局部极大值: 需高于前后各 N 日
+PEAK_MIN_GAP = 5           # 两个波峰最小间隔 (交易日)
+DIFF_PEAK_SEARCH = 5       # 在价格峰附近 ±N 日内找 DIFF 峰
+
+
+def _ema(arr: np.ndarray, span: int) -> np.ndarray:
+    """指数移动平均 (与 pandas ewm 一致)。"""
+    alpha = 2.0 / (span + 1)
+    out = np.empty_like(arr, dtype=float)
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = alpha * arr[i] + (1 - alpha) * out[i - 1]
+    return out
+
+
+def _compute_macd(closes: np.ndarray):
+    """返回 (diff_line, dea_line, macd_hist)。
+    diff = EMA12 - EMA26, dea = EMA9(diff), hist = diff - dea。
+    """
+    ema12 = _ema(closes, 12)
+    ema26 = _ema(closes, 26)
+    diff = ema12 - ema26
+    dea = _ema(diff, 9)
+    hist = diff - dea
+    return diff, dea, hist
+
+
+def _find_local_peaks(
+    arr: np.ndarray, pos: int, lookback: int, neighbor: int,
+) -> List[int]:
+    """在 [pos-lookback, pos] 范围内找局部极大值。"""
+    start = max(neighbor, pos - lookback)
+    end = min(pos, len(arr) - neighbor - 1)
+    peaks = []
+    for i in range(start, end + 1):
+        window_left = arr[i - neighbor:i]
+        window_right = arr[i + 1:i + neighbor + 1]
+        if len(window_left) == 0 or len(window_right) == 0:
+            continue
+        if arr[i] >= np.max(window_left) and arr[i] >= np.max(window_right):
+            peaks.append(i)
+    return peaks
+
+
+def _filter_peaks_by_gap(peaks: List[int], min_gap: int) -> List[int]:
+    """去除间距不足的波峰，保留靠后的那个。"""
+    if len(peaks) <= 1:
+        return peaks
+    filtered: List[int] = [peaks[0]]
+    for p in peaks[1:]:
+        if p - filtered[-1] >= min_gap:
+            filtered.append(p)
+    return filtered
+
+
+def _find_nearby_diff_peak(
+    diff: np.ndarray, center: int, radius: int,
+) -> Tuple[int, float]:
+    """在 center ± radius 范围内找 DIFF 的最大值位置和值。"""
+    lo = max(0, center - radius)
+    hi = min(len(diff) - 1, center + radius)
+    seg = diff[lo:hi + 1]
+    offset = int(np.argmax(seg))
+    idx = lo + offset
+    return idx, diff[idx]
+
+
+def detect_top_divergence(
+    closes: np.ndarray, pos: int,
+    lookback: int = DIVERGENCE_LOOKBACK,
+) -> Tuple[bool, str]:
+    """检测 pos 之前是否存在 MACD-DIFF 顶背离。
+
+    算法:
+        1. 用收盘价找两个近期价格波峰
+        2. 在每个价格峰附近 ±DIFF_PEAK_SEARCH 日找 DIFF 线的峰值
+        3. 价格更高但 DIFF 峰更低 → 顶背离
+
+    Returns:
+        (is_divergence, detail_str)
+    """
+    if pos < 30:
+        return False, ''
+
+    diff, dea, hist = _compute_macd(closes)
+
+    price_peaks = _find_local_peaks(closes, pos, lookback, PEAK_NEIGHBOR)
+    price_peaks = _filter_peaks_by_gap(price_peaks, PEAK_MIN_GAP)
+
+    if len(price_peaks) < 2:
+        return False, ''
+
+    peak_a, peak_b = price_peaks[-2], price_peaks[-1]
+
+    diff_idx_a, diff_val_a = _find_nearby_diff_peak(diff, peak_a, DIFF_PEAK_SEARCH)
+    diff_idx_b, diff_val_b = _find_nearby_diff_peak(diff, peak_b, DIFF_PEAK_SEARCH)
+
+    price_higher = closes[peak_b] >= closes[peak_a] * 0.99
+    diff_lower = diff_val_b < diff_val_a * 0.90
+
+    is_div = price_higher and diff_lower
+    detail = (
+        f"价格峰1(T-{pos - peak_a})={closes[peak_a]:.2f}/DIFF(T-{pos - diff_idx_a})={diff_val_a:.3f}"
+        f" vs 价格峰2(T-{pos - peak_b})={closes[peak_b]:.2f}/DIFF(T-{pos - diff_idx_b})={diff_val_b:.3f}"
+    )
+    return is_div, detail
+
+
+# ══════════════════════════════════════════════════════════════
+#  三角架托检测
+# ══════════════════════════════════════════════════════════════
+
+TRIANGLE_LOOKBACK = 40     # 回看窗口 (交易日)
+TRIANGLE_NEAR_PCT = 0.5    # MA10 "即将上穿" MA20 的距离阈值 (%)
+
+
+def _find_cross_up(fast: np.ndarray, slow: np.ndarray,
+                   start: int, end: int) -> int:
+    """在 [start, end] 中找 fast 上穿 slow 的最早位置，未找到返回 -1。"""
+    for i in range(max(start, 1), end + 1):
+        if fast[i] > slow[i] and fast[i - 1] <= slow[i - 1]:
+            return i
+    return -1
+
+
+def _find_cross_up_last(fast: np.ndarray, slow: np.ndarray,
+                        start: int, end: int) -> int:
+    """在 [start, end] 中找 fast 上穿 slow 的最晚位置，未找到返回 -1。"""
+    for i in range(end, max(start - 1, 0), -1):
+        if i < 1:
+            break
+        if fast[i] > slow[i] and fast[i - 1] <= slow[i - 1]:
+            return i
+    return -1
+
+
+def detect_triangle_support(
+    ma_dict: Dict[int, np.ndarray], pos: int,
+    lookback: int = TRIANGLE_LOOKBACK,
+) -> Tuple[bool, str]:
+    """检测 pos 之前距今最近的一次三角架托形态。
+
+    从最后一次 MA10×MA20 金叉倒推，找与之匹配的最近 MA5×MA20、MA5×MA10。
+
+    三角架托 = 三次金叉依次出现:
+        1) MA5 上穿 MA10
+        2) MA5 上穿 MA20 (在 1 之后)
+        3) MA10 上穿 MA20 (在 2 之后)，或 MA10 距 MA20 <= TRIANGLE_NEAR_PCT%
+
+    Returns:
+        (is_triangle, detail_str)
+    """
+    ma5 = ma_dict[5]
+    ma10 = ma_dict[10]
+    ma20 = ma_dict[20]
+
+    start = max(1, pos - lookback)
+
+    # 倒序查找：先找最近的 MA10×MA20 金叉（或即将上穿），再往前匹配
+    cross3 = _find_cross_up_last(ma10, ma20, start, pos)
+
+    if cross3 >= 0:
+        # 在 cross3 之前找最近的 MA5×MA20
+        cross2 = _find_cross_up_last(ma5, ma20, start, cross3)
+        if cross2 >= 0:
+            # 在 cross2 之前找最近的 MA5×MA10
+            cross1 = _find_cross_up_last(ma5, ma10, start, cross2)
+            if cross1 >= 0:
+                detail = (
+                    f"MA5×MA10(T-{pos - cross1})"
+                    f" → MA5×MA20(T-{pos - cross2})"
+                    f" → MA10×MA20(T-{pos - cross3})"
+                )
+                return True, detail
+
+    # 未找到已完成的架托，检查"即将上穿"
+    ma10_val = ma10[pos]
+    ma20_val = ma20[pos]
+    if (not np.isnan(ma10_val) and not np.isnan(ma20_val)
+            and ma20_val > 0):
+        gap_pct = (ma20_val - ma10_val) / ma20_val * 100
+        if 0 < gap_pct <= TRIANGLE_NEAR_PCT:
+            cross2 = _find_cross_up_last(ma5, ma20, start, pos)
+            if cross2 >= 0:
+                cross1 = _find_cross_up_last(ma5, ma10, start, cross2)
+                if cross1 >= 0:
+                    detail = (
+                        f"MA5×MA10(T-{pos - cross1})"
+                        f" → MA5×MA20(T-{pos - cross2})"
+                        f" → MA10即将上穿MA20(差{gap_pct:.2f}%)"
+                    )
+                    return True, detail
+
+    return False, ''
 
 
 # ══════════════════════════════════════════════════════════════
@@ -516,6 +723,10 @@ class PullbackMA10Screener:
         # ── 20日最大回撤(距MA20) ──
         max_dd_ma20 = self._max_drawdown_from_ma20(lows, ma_dict[20], pos, 20)
 
+        # ── 附加信号检测（仅标注，不影响筛选） ──
+        is_div, div_detail = detect_top_divergence(closes, pos)
+        is_tri, tri_detail = detect_triangle_support(ma_dict, pos)
+
         # ── 评分 ──
         s_a = _score_ma_quality(ma_up_count, slope_ma10, slope_ma5)
         s_b = _score_cohesion(spread_10_20, spread_10_30, spread_20_30)
@@ -567,6 +778,10 @@ class PullbackMA10Screener:
             grade=grade,
             rise_from_low_pct=round(rise_from_low * 100, 1),
             is_realtime=is_rt,
+            top_divergence=is_div,
+            divergence_detail=div_detail,
+            triangle_support=is_tri,
+            triangle_detail=tri_detail,
         )
 
     # ── 放量上涨统计 ──
@@ -770,21 +985,30 @@ def format_scan_result(result: PullbackScanResult) -> str:
         lines.append('')
         return '\n'.join(lines)
 
+    def _build_signals(it: PullbackItem) -> str:
+        """汇总该标的的附加信号标签。"""
+        tags = []
+        if it.triangle_support:
+            tags.append('△架托')
+        if it.top_divergence:
+            tags.append('⚠顶背离')
+        return ' '.join(tags) if tags else '—'
+
     def _table(items: List[PullbackItem]):
         lines.append(
             '| # | 代码 | 名称 | 收盘 | 涨跌% | 量比 | 回踩 | '
-            '粘合度 | MA10斜率 | 放量 | 20日回撤 | 评分 | 概念/板块 |'
+            '粘合度 | MA10斜率 | 放量 | 评分 | 信号 | 概念/板块 |'
         )
         lines.append(
             '|---|------|------|------|-------|------|------|'
-            '--------|---------|------|---------|------|-----------|'
+            '--------|---------|------|------|------|-----------|'
         )
         for i, it in enumerate(items):
             rt_tag = '⚡' if it.is_realtime else ''
             concepts_str = ' / '.join(it.concepts[:3]) if it.concepts else '—'
             dist_pct = it.dist_to_ma10_pct if it.pullback_target == 'MA10' else it.dist_to_ma20_pct
             pullback_label = f'{it.pullback_target}{dist_pct:+.1f}%'
-            dd_label = f'{it.max_drawdown_ma20_pct:.1f}%' if it.max_drawdown_ma20_pct < 0 else '—'
+            signals_str = _build_signals(it)
             lines.append(
                 f'| {i + 1} '
                 f'| {it.code} '
@@ -796,8 +1020,8 @@ def format_scan_result(result: PullbackScanResult) -> str:
                 f'| {it.spread_10_20_pct:.1f}% '
                 f'| {it.slope_ma10_pct:+.1f}% '
                 f'| {it.surge_days}次 '
-                f'| {dd_label} '
                 f'| **{it.total_score:.0f}** '
+                f'| {signals_str} '
                 f'| {concepts_str} |'
             )
         lines.append('')
@@ -834,5 +1058,21 @@ def format_scan_result(result: PullbackScanResult) -> str:
             f'20日最大回撤{top.max_drawdown_ma20_pct:.1f}%(距MA20)'
         )
         lines.append('')
+
+    tri_items = [x for x in result.items if x.triangle_support]
+    if tri_items:
+        lines.append('<details><summary>△ 三角架托详情（共 %d 只，点击展开）</summary>\n'
+                      % len(tri_items))
+        for it in tri_items:
+            lines.append(f'- **{it.name}**({it.code}) {it.grade}级 {it.total_score:.0f}分: {it.triangle_detail}')
+        lines.append('\n</details>\n')
+
+    div_items_all = [x for x in result.items if x.top_divergence]
+    if div_items_all:
+        lines.append('<details><summary>⚠ DIFF顶背离详情（共 %d 只，点击展开）</summary>\n'
+                      % len(div_items_all))
+        for it in div_items_all:
+            lines.append(f'- **{it.name}**({it.code}) {it.grade}级 {it.total_score:.0f}分: {it.divergence_detail}')
+        lines.append('\n</details>\n')
 
     return '\n'.join(lines)
