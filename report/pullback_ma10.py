@@ -7,7 +7,7 @@
 设计文档: docs/pullback_ma10_strategy.md
 
 四大核心条件:
-    1. 均线多头排列 + 斜率向上且温和 (MA5>MA10>MA20>MA30, 0.5%<=slope_ma10<=5%, slope_ma5<=7%)
+    1. 均线多头排列 + 斜率向上且温和 (MA5>MA10>MA20>MA30, T/T-1单日斜率0.05%~1.5%, slope_ma5<=7%)
     2. 均线粘合度 — MA10距MA20<=6.5%, 距MA30<=10%
     3. 当日缩量阴线 + 回踩MA10附近(+2%/-3%) 或 MA20附近(±2%)
     4. 过去20日有放量上涨 (涨幅>=3% 且 量>=MA20量×1.5)
@@ -49,8 +49,8 @@ MIN_DATA_LEN = 60
 #  阈值常量
 # ══════════════════════════════════════════════════════════════
 
-SLOPE_MA10_MIN = 0.5      # MA10 斜率下限 (%)
-SLOPE_MA10_MAX = 5.0      # MA10 斜率上限 (%)
+SLOPE_MA10_MIN = 0.05     # MA10 单日斜率下限 (%)
+SLOPE_MA10_MAX = 1.5      # MA10 单日斜率上限 (%)
 SLOPE_MA5_MAX = 7.0       # MA5 斜率上限 (%)
 SPREAD_10_20_MAX = 6.5    # MA10-MA20 粘合度上限 (%)
 SPREAD_10_30_MAX = 10.0   # MA10-MA30 粘合度上限 (%)
@@ -208,13 +208,13 @@ def _score_ma_quality(ma_up_count: int, slope_ma10: float, slope_ma5: float) -> 
     else:
         base = 5.0
 
-    if 0.5 <= slope_ma10 <= 1.0:
+    if 0.05 <= slope_ma10 <= 0.3:
         base += 30
-    elif slope_ma10 <= 2.0:
+    elif slope_ma10 <= 0.6:
         base += 25
-    elif slope_ma10 <= 3.0:
+    elif slope_ma10 <= 1.0:
         base += 15
-    elif slope_ma10 <= 4.0:
+    elif slope_ma10 <= 1.5:
         base += 5
 
     if slope_ma5 > 0:
@@ -416,13 +416,11 @@ class PullbackMA10Screener:
         if not (ma_vals[5] > ma_vals[10] > ma_vals[20] > ma_vals[30]):
             return None
 
-        # MA10 斜率 (5日)
-        if pos < 5:
+        # MA10 斜率 (T vs T-1)
+        ma10_prev = ma_dict[10][pos - 1]
+        if np.isnan(ma10_prev) or ma10_prev <= 0:
             return None
-        ma10_5ago = ma_dict[10][pos - 5]
-        if np.isnan(ma10_5ago) or ma10_5ago <= 0:
-            return None
-        slope_ma10 = (ma_vals[10] - ma10_5ago) / ma10_5ago * 100
+        slope_ma10 = (ma_vals[10] - ma10_prev) / ma10_prev * 100
         if not (SLOPE_MA10_MIN <= slope_ma10 <= SLOPE_MA10_MAX):
             return None
 

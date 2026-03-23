@@ -900,6 +900,7 @@ class DataManager:
 
     def _run_chips(self, stocks):
         result = {}
+        total = len(stocks)
         cached, fetched, fail = 0, 0, 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
             fmap = {executor.submit(self._fetch_chips_one, s): s for s in stocks}
@@ -913,8 +914,10 @@ class DataManager:
                         cached += 1
                     elif status == 'fetched':
                         fetched += 1
+                        logging.info("筹码 [%d/%d] %s(%s) 拉取成功", cached + fetched + fail, total, stock[1], stock[0])
                     else:
                         fail += 1
+                        logging.debug("筹码 [%d/%d] %s(%s) 拉取失败", cached + fetched + fail, total, stock[1], stock[0])
                 except Exception:
                     fail += 1
         logging.info(
